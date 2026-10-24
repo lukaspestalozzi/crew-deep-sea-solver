@@ -29,10 +29,12 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--all-drafts] [--limit N] [--no-cache]
+  crew solve FILE [--analyse] [--all-drafts] [--limit N] [--no-cache]
                                  solve every situation in a .crew file; tasks with
                                  owner ? are searched over all legal drafts (sampled
-                                 above N drafts); --all-drafts also checks other drafts
+                                 above N drafts); --all-drafts also checks other drafts;
+                                 --analyse adds critical decisions, smallest conflict
+                                 and point of no return
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
                                  random deals, tasks drawn to the target sum, random legal draft";
 
@@ -202,6 +204,7 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
     let file = args.iter().find(|a| !a.starts_with("--")).ok_or(USAGE)?;
     let use_cache = !args.iter().any(|a| a == "--no-cache");
     let all_drafts = args.iter().any(|a| a == "--all-drafts");
+    let analyse = args.iter().any(|a| a == "--analyse");
     let limit: u64 = flag(args, "--limit", 2000)?;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
     let list = notation::parse_all(&text).map_err(|e| format!("{file}: {e}"))?;
@@ -226,8 +229,48 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
                     Verdict::Feasible(line) => {
                         println!("FEASIBLE");
                         print_line(s, line);
+                        if analyse {
+                            if let Ok(Some(t)) = analysis::tightness(s, line, None) {
+                                println!(
+                                    "critical decisions: {} of {} choices; tightness {:.0}%",
+                                    t.critical,
+                                    t.choices,
+                                    100.0 * t.tightness
+                                );
+                            }
+                        }
                     }
-                    Verdict::Infeasible => println!("NOT FEASIBLE"),
+                    Verdict::Infeasible => {
+                        println!("NOT FEASIBLE");
+                        if analyse {
+                            if let Ok(Some(c)) = analysis::smallest_conflict(s, None) {
+                                if c.len() == 1 {
+                                    println!("impossible on its own:");
+                                } else {
+                                    println!("smallest conflict ({} tasks):", c.len());
+                                }
+                                for i in c {
+                                    let a = &s.tasks[i];
+                                    println!("  {} · {}", owner_name(&a.owner), a.card.id);
+                                }
+                            }
+                            if !s.played.is_empty() {
+                                match analysis::point_of_no_return(s, None) {
+                                    Ok(Some(analysis::NoReturn::FromTheStart)) => println!("never winnable from the deal"),
+                                    Ok(Some(analysis::NoReturn::At { trick, player, card, alternatives })) => {
+                                        let alts: Vec<String> = alternatives.iter().map(|c| c.to_string()).collect();
+                                        println!(
+                                            "lost in trick {} when Player{} played {card}; would have kept a winning line: {}",
+                                            trick + 1,
+                                            player + 1,
+                                            if alts.is_empty() { "none".into() } else { alts.join(" ") }
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     Verdict::Redeal(id) => println!("RE-DEAL (task '{id}')"),
                     Verdict::Cancelled => println!("CANCELLED"),
                 }

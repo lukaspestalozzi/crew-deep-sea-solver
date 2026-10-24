@@ -192,6 +192,223 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
     Ok(report)
 }
 
+// ---------------------------------------------------------------- conflicts
+
+/// Smallest set of tasks (indices into `s.tasks`) that cannot all be
+/// fulfilled together from the deal, by deletion: each task in the result is
+/// needed for the conflict. Played tricks are ignored, so this explains why
+/// the mission was impossible from the start (use [`point_of_no_return`] for
+/// games that became impossible during play). Requires every owner fixed.
+/// `None` if feasible from the deal, or cancelled. One solve per task.
+pub fn smallest_conflict(s: &Situation, cancel: Option<&AtomicBool>) -> Result<Option<Vec<usize>>, SolveError> {
+    let opts = Options { cancel, ..Options::default() };
+    let infeasible = |keep: &[usize]| -> Result<Option<bool>, SolveError> {
+        let mut sub = s.clone();
+        sub.played.clear();
+        sub.tasks = keep.iter().map(|&i| s.tasks[i].clone()).collect();
+        Ok(match solver::solve(&sub, &opts)?.0 {
+            Verdict::Infeasible => Some(true),
+            Verdict::Cancelled => None,
+            _ => Some(false),
+        })
+    };
+    let mut keep: Vec<usize> = (0..s.tasks.len()).collect();
+    match infeasible(&keep)? {
+        Some(true) => {}
+        _ => return Ok(None),
+    }
+    let mut i = 0;
+    while i < keep.len() {
+        let mut without = keep.clone();
+        without.remove(i);
+        match infeasible(&without)? {
+            Some(true) => keep = without,
+            Some(false) => i += 1,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(keep))
+}
+
+// ---------------------------------------------------------------- point of no return
+
+/// Where a played game became unwinnable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoReturn {
+    /// The mission was never winnable from the deal.
+    FromTheStart,
+    /// Still winnable after the last card entered.
+    StillWinnable,
+    /// Winnable before this card, lost after it.
+    At {
+        /// 0-based trick index.
+        trick: usize,
+        player: usize,
+        card: Card,
+        /// Legal cards at that moment that would have kept a winning line.
+        alternatives: Vec<Card>,
+    },
+}
+
+/// Replays the entered tricks and finds the first card after which no winning
+/// line exists. Uses binary search: along the played line, winnability can
+/// only switch from yes to no once. Requires every owner fixed.
+pub fn point_of_no_return(s: &Situation, cancel: Option<&AtomicBool>) -> Result<Option<NoReturn>, SolveError> {
+    let (_, tasks) = solver::prepare(s)?;
+    let cards: Vec<Card> = s.played.iter().flat_map(|t| t.cards.iter().copied()).collect();
+    let opts = Options { cancel, ..Options::default() };
+    let start = crate::game::Game::new(&s.hands).map_err(|e| SolveError::Replay(e.to_string()))?;
+    let at = |k: usize| {
+        let mut g = start.clone();
+        for &c in &cards[..k] {
+            g.play(c);
+        }
+        g
+    };
+    let winnable = |k: usize| -> Option<bool> {
+        match solver::solve_game(at(k), &tasks, &opts).0 {
+            Verdict::Feasible(_) => Some(true),
+            Verdict::Infeasible => Some(false),
+            _ => None,
+        }
+    };
+    let Some(first) = winnable(0) else { return Ok(None) };
+    if !first {
+        return Ok(Some(NoReturn::FromTheStart));
+    }
+    let Some(last) = winnable(cards.len()) else { return Ok(None) };
+    if last {
+        return Ok(Some(NoReturn::StillWinnable));
+    }
+    // Invariant: winnable(lo) && !winnable(hi).
+    let (mut lo, mut hi) = (0, cards.len());
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        match winnable(mid) {
+            Some(true) => lo = mid,
+            Some(false) => hi = mid,
+            None => return Ok(None),
+        }
+    }
+    // The card at index `lo` lost the game.
+    let g = at(lo);
+    let player = g.to_play();
+    let trick = g.tricks.len();
+    let mut alternatives = Vec::new();
+    for c in g.legal_moves().iter() {
+        if c == cards[lo] {
+            continue;
+        }
+        let mut h = g.clone();
+        h.play(c);
+        match solver::solve_game(h, &tasks, &opts).0 {
+            Verdict::Feasible(_) => alternatives.push(c),
+            Verdict::Cancelled => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(Some(NoReturn::At { trick, player, card: cards[lo], alternatives }))
+}
+
+// ---------------------------------------------------------------- difficulty
+
+/// How forgiving a winning line is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tightness {
+    /// Moments along the winning line where some legal card would lose the mission.
+    pub critical: usize,
+    /// Moments with more than one legal card.
+    pub choices: usize,
+    /// Average share of losing cards over the moments with a choice (0..1).
+    pub tightness: f64,
+}
+
+/// Walks the given winning line from the situation's position; at every card
+/// with a choice, tests each legal alternative. Requires every owner fixed.
+pub fn tightness(s: &Situation, line: &[Card], cancel: Option<&AtomicBool>) -> Result<Option<Tightness>, SolveError> {
+    let (mut g, tasks) = solver::prepare(s)?;
+    let opts = Options { cancel, ..Options::default() };
+    let (mut critical, mut choices, mut share_sum) = (0, 0, 0.0);
+    for &card in line {
+        let legal: Vec<Card> = g.legal_moves().iter().collect();
+        if legal.len() > 1 {
+            choices += 1;
+            let mut losing = 0;
+            for &c in &legal {
+                if c == card {
+                    continue;
+                }
+                let mut h = g.clone();
+                h.play(c);
+                match solver::solve_game(h, &tasks, &opts).0 {
+                    Verdict::Infeasible => losing += 1,
+                    Verdict::Cancelled => return Ok(None),
+                    _ => {}
+                }
+            }
+            if losing > 0 {
+                critical += 1;
+            }
+            share_sum += losing as f64 / legal.len() as f64;
+        }
+        g.play(card);
+    }
+    let tightness = if choices > 0 { share_sum / choices as f64 } else { 0.0 };
+    Ok(Some(Tightness { critical, choices, tightness }))
+}
+
+/// Share of random deals on which these tasks can be fulfilled with some
+/// legal draft (up to `drafts_per_deal` random drafts tried per deal, so the
+/// result is a lower bound when a deal has more drafts than that).
+pub fn deal_robustness(
+    cards: &[&'static crate::catalogue::TaskCard],
+    players: usize,
+    deals: usize,
+    drafts_per_deal: usize,
+    seed: u64,
+    cancel: Option<&AtomicBool>,
+) -> Option<(usize, usize)> {
+    use crate::game::Game;
+    use crate::situation::Assignment;
+    let mut rng = Rng::new(seed);
+    let opts = Options { cancel, ..Options::default() };
+    let mut ok = 0;
+    for _ in 0..deals {
+        let hands = Game::random_hands(players, &mut rng);
+        let captain = Game::new(&hands).unwrap().captain as usize;
+        let mut s = Situation {
+            hands,
+            tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
+            ..Situation::default()
+        };
+        if solver::redeal(&s).is_some() {
+            continue;
+        }
+        let mut seen = HashSet::new();
+        for _ in 0..drafts_per_deal * 5 {
+            if seen.len() >= drafts_per_deal {
+                break;
+            }
+            let Some(owners) = draft::random_draft(&s.tasks, players, captain, &mut rng) else { break };
+            if !seen.insert(owners.clone()) {
+                continue;
+            }
+            for (a, o) in s.tasks.iter_mut().zip(&owners) {
+                a.owner = *o;
+            }
+            match solver::solve(&s, &opts) {
+                Ok((Verdict::Feasible(_), _)) => {
+                    ok += 1;
+                    break;
+                }
+                Ok((Verdict::Cancelled, _)) => return None,
+                _ => {}
+            }
+        }
+    }
+    Some((ok, deals))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +472,60 @@ tasks:
         players.sort();
         assert_eq!(players, vec![1, 3]);
         assert_eq!(r.any_works, Some(true));
+    }
+
+    #[test]
+    fn smallest_conflict_finds_the_two_clashing_tasks() {
+        // Player2 must win trick 1 and Player3 must win the first 2 tricks: clash.
+        let s = situation("Player2: win B4\nPlayer2: first-trick\nPlayer3: first 2\nPlayer4: no pink");
+        let c = smallest_conflict(&s, None).unwrap().unwrap();
+        let ids: Vec<&str> = c.iter().map(|&i| s.tasks[i].card.id.as_str()).collect();
+        assert_eq!(ids, vec!["first-trick", "first 2"]);
+        let ok = situation("Player2: win B4");
+        assert_eq!(smallest_conflict(&ok, None).unwrap(), None);
+    }
+
+    #[test]
+    fn point_of_no_return_on_a_played_line() {
+        // Player2 must win B4 (held by Player1). Trick 1: Player1 leads B4 and
+        // Player2 plays low, Player3 B3, Player4 B5 wins B4: lost at Player2's B1.
+        let mut s = situation("Player2: win B4");
+        s.played = vec![crate::situation::PlayedTrick {
+            leader: 0,
+            cards: ["B4", "B1", "B3", "B5"].iter().map(|c| Card::parse(c).unwrap()).collect(),
+        }];
+        match point_of_no_return(&s, None).unwrap().unwrap() {
+            NoReturn::At { trick, player, card, alternatives } => {
+                assert_eq!((trick, player, card.to_string()), (0, 1, "B1".to_string()));
+                // B6 would have beaten B5; B2 would not.
+                let alts: Vec<String> = alternatives.iter().map(|c| c.to_string()).collect();
+                assert_eq!(alts, vec!["B6"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let fresh = situation("Player2: win B4");
+        assert_eq!(point_of_no_return(&fresh, None).unwrap(), Some(NoReturn::StillWinnable));
+        let never = situation("Player2: win S3");
+        assert_eq!(point_of_no_return(&never, None).unwrap(), Some(NoReturn::FromTheStart));
+    }
+
+    #[test]
+    fn tightness_counts_critical_moments() {
+        let s = situation("Player2: win B4");
+        let Verdict::Feasible(line) = solver::solve(&s, &Options::default()).unwrap().0 else { panic!() };
+        let t = tightness(&s, &line, None).unwrap().unwrap();
+        assert!(t.choices > 0);
+        assert!(t.critical >= 1 && t.critical <= t.choices);
+        assert!(t.tightness > 0.0 && t.tightness < 1.0);
+    }
+
+    #[test]
+    fn deal_robustness_of_an_easy_and_an_impossible_set() {
+        let easy = [crate::catalogue::find("first-trick").unwrap()];
+        assert_eq!(deal_robustness(&easy, 4, 10, 5, 1, None), Some((10, 10)));
+        let clash = [crate::catalogue::find("first-trick").unwrap(), crate::catalogue::find("first 2").unwrap()];
+        // Same player may take both only with 2 tasks per seat; with 4 players each takes one.
+        assert_eq!(deal_robustness(&clash, 4, 5, 5, 1, None), Some((0, 5)));
     }
 
     #[test]
