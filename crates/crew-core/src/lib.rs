@@ -6,4 +6,5 @@ pub mod game;
 pub mod notation;
 pub mod rng;
 pub mod situation;
+pub mod solver;
 pub mod task;

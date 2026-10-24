@@ -450,6 +450,63 @@ impl Kind {
     }
 }
 
+impl Kind {
+    /// Everything about the game's history that this task's future evaluation
+    /// depends on, beyond the remaining hands, the leader and the trick number.
+    /// Two positions with equal hands, leader and signatures of all tasks have
+    /// the same outcome; the solver caches failed positions by this key.
+    /// Only valid between tricks and for tasks that have not failed.
+    pub fn signature(&self, g: &Game, owner: usize) -> u64 {
+        let won = g.won[owner];
+        let my = g.trick_counts[owner] as u64;
+        let counts = || (0..g.n).fold(0u64, |acc, q| acc | (g.trick_counts[q] as u64) << (4 * q));
+        let won_last = g.tricks.last().is_some_and(|t| t.winner as usize == owner);
+        let status = self.eval(g, owner) as u64;
+        let info = match self {
+            Kind::WinCards(s) | Kind::WinNone(s) => won.intersect(*s).0,
+            Kind::OnlySub(_) => won.intersect(Suit::Sub.cards()).0,
+            Kind::NoLead(_)
+            | Kind::WinWith { .. }
+            | Kind::Trick(_)
+            | Kind::NoneOfFirst(_)
+            | Kind::WinTricks { .. }
+            | Kind::Predict
+            | Kind::CrewNoLead(_)
+            | Kind::LastCardOfGame(_) => 0,
+            Kind::VsCaptain(_) => (my as i64 - g.trick_counts[g.captain as usize] as i64 + 64) as u64,
+            Kind::ExactTricks(_) => my,
+            Kind::SuitCounts { counts, .. } => counts
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, (s, _))| acc | (won.intersect(s.cards()).len() as u64) << (4 * i)),
+            Kind::ValueCount { value, .. } => won.intersect(CardSet::colour_value(*value)).len() as u64,
+            Kind::InARow { .. } => {
+                let idx: Vec<usize> = won_indices(g, owner).collect();
+                let (best, tail) = runs(&idx, g.tricks.len());
+                my | (tail as u64) << 8 | (best as u64) << 16
+            }
+            Kind::NoTwoInARow => won_last as u64,
+            Kind::AllOfAColour => Suit::COLOURS.iter().enumerate().fold(0, |acc, (i, s)| {
+                let spoiled = (0..g.n).any(|q| q != owner && !g.won[q].intersect(s.cards()).is_empty());
+                acc | (spoiled as u64) << i
+            }),
+            Kind::MoreOf(a, b) | Kind::SameOf(a, b) => {
+                won.intersect(a.cards()).len() as u64 | (won.intersect(b.cards()).len() as u64) << 8
+            }
+            Kind::MostTricks | Kind::MoreThanAllOthers | Kind::FewestTricks => counts(),
+            Kind::FirstWinnerAlwaysLeads => {
+                counts() | g.tricks.first().map_or(7, |t| t.winner as u64) << 24
+            }
+            Kind::BalancedValue(v) => {
+                let set = CardSet::colour_value(*v);
+                (0..g.n).fold(0, |acc, q| acc | (g.won[q].intersect(set).len() as u64) << (4 * q))
+            }
+        };
+        debug_assert!(info < 1 << 60);
+        status << 60 | info
+    }
+}
+
 fn won_tricks<'a>(g: &'a Game, owner: usize) -> impl Iterator<Item = &'a Trick> + 'a {
     g.tricks.iter().filter(move |t| t.winner as usize == owner)
 }
