@@ -7,7 +7,7 @@
   import { winningPosition } from '../lib/cards';
   import { i18n } from '../lib/i18n.svelte';
   import { Cancelled, SolverClient, type DraftsOut, type NoReturnOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
-  import { textOf } from '../lib/tasks';
+  import { isInferred, textOf } from '../lib/tasks';
   import { check, parse, toText, type Situation } from '../lib/wasm';
 
   type Verdict = 'feasible' | 'infeasible' | 'redeal' | null;
@@ -277,7 +277,7 @@
       </div>
       <div class="panel">
         <span class="label" style="font-size: 12px">{i18n.t('taskSet')}</span>
-        <span class="m"><span class="small muted">{i18n.t('printedSum')}</span><strong>{difficulty}</strong></span>
+        <span class="m"><span class="small muted">{i18n.t('printedSum')}</span><strong>{situation.tasks.some((t) => isInferred(t.id)) ? '≈' : ''}{difficulty}</strong></span>
         <span class="m">
           <span class="small muted">{i18n.t('randomDeals')}</span>
           {#if robustness}

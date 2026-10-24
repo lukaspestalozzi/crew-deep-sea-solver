@@ -45,6 +45,18 @@ export function taskText(t: TaskCard | undefined): string {
 
 export const textOf = (id: string) => taskText(taskById(id));
 
+/** True for generated tasks, whose difficulty is inferred. */
+export const isInferred = (id: string) => taskById(id)?.official === false;
+
+/** Examples of the parametric task IDs, one per family. */
+export const SYNTAX = [
+  'win P3 Y7', 'win all 5s', 'no pink 9s', 'no subs', 'no-lead blue green', 'win with 4', 'win 8 with 3',
+  'trick below 5', 'trick above 6', 'trick sum >25', 'trick sum <10', 'trick sum 18-20', 'trick pink=green',
+  'win B6 with sub', 'win Y3 last', 'none of first 6', 'tricks =3', 'first 4', 'first 2+last', 'only first 2',
+  'row 4', 'exactly row 3', 'at least 6 green', 'exactly 2 pink 1 sub', 'at least two 8s', 'exactly one 1s',
+  'only S3', 'more green than blue', 'blue=yellow',
+];
+
 export function difficultyOf(id: string, players: number): number {
   const t = taskById(id);
   return t?.difficulty ? t.difficulty[players - 3] : 0;

@@ -64,9 +64,35 @@ trick1 Player1: G6 G4 G2 G3
 
 - Cards: `P B G Y S` (pink, blue, green, yellow, submarine) + value. `rest` stands for one player's remaining cards.
 - Hands are always the full hands as dealt; played cards are subtracted.
-- Task owners: `PlayerN`, `?` (unknown, draft search) or `crew` (rule cards only). Task IDs are listed in `tasks.toml`.
+- Task owners: `PlayerN`, `?` (unknown, draft search) or `crew` (rule cards only).
+- Tasks: an official ID from `tasks.toml`, or any task of the categories as a parametric ID (below).
 - `played`: leader, then the cards clockwise. The last trick may be incomplete.
 - `#` starts a comment. Several situations in one file are separated by a line `---`.
+
+## Generated tasks
+
+Besides the official cards, every task of the official categories can be
+written as an ID. An ID that describes an official card resolves to it
+(`win Y7 B6` is the card `win B6 Y7`). Generated tasks have a difficulty
+inferred by a rule of thumb per category (shown as ≈) and no re-deal
+clauses. Random draws ("Fill randomly", `bench`) use official cards only.
+Rule cards are not generated.
+
+| Family | Examples |
+| --- | --- |
+| Win cards | `win P3 Y7`, `win S2`, `win all 5s` |
+| Win none | `no pink green`, `no subs`, `no 8s 9s` |
+| Not leading | `no-lead blue green` |
+| Win with | `win with 4`, `win 8 with 3` |
+| Trick property | `trick below 5`, `trick above 6`, `trick even`, `trick sum >25`, `trick sum <10`, `trick sum 18-20`, `trick pink=green`, `win B6 with sub`, `win Y3 last` |
+| Specific tricks | `first 4`, `first 2+last`, `only first 2`, `none of first 6` |
+| Trick count | `tricks =3` |
+| In a row | `row 4`, `exactly row 3` |
+| Colour counts | `at least 6 green`, `exactly 2 pink 1 sub` |
+| Value counts | `at least two 8s`, `exactly one 1s` |
+| Other | `only S3`, `more green than blue`, `blue=yellow` |
+
+The grammar is in `crates/crew-core/src/generate.rs`.
 
 ## Web app
 

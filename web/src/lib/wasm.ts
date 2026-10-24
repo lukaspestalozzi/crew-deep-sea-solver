@@ -14,6 +14,8 @@ export interface TaskCard {
   captain_allowed: boolean;
   /** Specific cards the task names, for chips. */
   cards: string[];
+  /** A card of the game; generated tasks have an inferred difficulty. */
+  official: boolean;
 }
 
 export interface Trick {
@@ -43,7 +45,16 @@ export async function loadWasm() {
 }
 
 export const getCatalogue = () => catalogue;
-export const taskById = (id: string) => byId.get(id);
+/** Official or generated task (parametric ID); undefined if the ID is invalid. */
+export function taskById(id: string): TaskCard | undefined {
+  const known = byId.get(id);
+  if (known) return known;
+  const r = resolveTask(id);
+  if ('error' in r) return undefined;
+  byId.set(id, r.ok);
+  return r.ok;
+}
+export const resolveTask = (id: string): Result<TaskCard> => JSON.parse(w.task_info(id));
 
 export const parse = (text: string): Result<Situation[]> => JSON.parse(w.parse(text));
 export const write = (list: Situation[]): Result<string> => JSON.parse(w.write(JSON.stringify(list)));

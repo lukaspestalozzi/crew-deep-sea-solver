@@ -3,7 +3,8 @@
 use crate::card::{Card, CardSet, Suit};
 use crate::task::{Cmp, Kind, TrickProp};
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// One task card (or rule card) of the catalogue.
 #[derive(Debug, Clone)]
@@ -19,6 +20,8 @@ pub struct TaskCard {
     /// The deal must be redone if any player holds all cards of one of these sets.
     pub redeal_if: Vec<CardSet>,
     pub kind: Kind,
+    /// A card of the game (from `data/tasks.toml`), not a generated one.
+    pub official: bool,
 }
 
 impl TaskCard {
@@ -49,8 +52,25 @@ pub fn catalogue() -> &'static [TaskCard] {
 
 /// Find a card by ID; whitespace is normalised.
 pub fn find(id: &str) -> Option<&'static TaskCard> {
+    resolve(id).ok()
+}
+
+/// An official card by ID; otherwise a generated card for a parametric ID
+/// (the official card if one has the same task). Generated cards are
+/// interned, so each lives once for the program's lifetime.
+pub fn resolve(id: &str) -> Result<&'static TaskCard, String> {
     let norm = normalise(id);
-    catalogue().iter().find(|t| t.id == norm)
+    if let Some(t) = catalogue().iter().find(|t| t.id == norm) {
+        return Ok(t);
+    }
+    let card = crate::generate::generate(&norm)?;
+    if let Some(t) = catalogue().iter().find(|t| t.kind == card.kind) {
+        return Ok(t);
+    }
+    static GENERATED: Mutex<Option<HashMap<String, &'static TaskCard>>> = Mutex::new(None);
+    let mut map = GENERATED.lock().unwrap();
+    let map = map.get_or_insert_with(HashMap::new);
+    Ok(*map.entry(card.id.clone()).or_insert_with(|| Box::leak(Box::new(card))))
 }
 
 pub fn normalise(id: &str) -> String {
@@ -239,6 +259,7 @@ fn convert(raw: Raw) -> Result<TaskCard, String> {
         note: raw.note,
         redeal_if: raw.redeal_if.iter().map(|s| selectors(s)).collect::<Result<_, _>>()?,
         kind,
+        official: true,
     })
 }
 

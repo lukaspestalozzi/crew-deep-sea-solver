@@ -3,10 +3,12 @@
   import Card from '../components/Card.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { router, session } from '../lib/state.svelte';
-  import { CATEGORIES, categoryName, difficultyOf, drawToTarget, taskText } from '../lib/tasks';
-  import { getCatalogue, taskById } from '../lib/wasm';
+  import { CATEGORIES, SYNTAX, categoryName, difficultyOf, drawToTarget, isInferred, taskText } from '../lib/tasks';
+  import { getCatalogue, resolveTask, taskById } from '../lib/wasm';
 
   let query = $state('');
+  let custom = $state('');
+  const customResult = $derived(custom.trim() ? resolveTask(custom) : null);
   let category = $state<string | null>(null);
 
   const selected = $derived(new Set(session.tasks.map((t) => t.id)));
@@ -21,6 +23,14 @@
   const taskCount = $derived(session.tasks.filter((t) => t.owner !== 'crew').length);
   const ruleCount = $derived(session.tasks.length - taskCount);
   const sum = $derived(session.tasks.reduce((a, t) => a + difficultyOf(t.id, session.players), 0));
+  const approx = $derived(session.tasks.some((t) => isInferred(t.id)) ? '≈' : '');
+
+  function addCustom() {
+    if (!customResult || 'error' in customResult) return;
+    const t = customResult.ok;
+    if (!selected.has(t.id)) toggle(t.id, t.rule);
+    custom = '';
+  }
 
   function toggle(id: string, rule: boolean) {
     if (selected.has(id)) session.tasks = session.tasks.filter((t) => t.id !== id);
@@ -60,13 +70,45 @@
       {#each session.tasks as s (s.id)}
         {@const t = taskById(s.id)}
         <div class="row" style="gap: 10px">
-          <span class="diff" aria-label={i18n.t('difficulty')}>{t?.rule ? '–' : difficultyOf(s.id, session.players)}</span>
+          <span class="diff" aria-label={i18n.t('difficulty')}>{t?.rule ? '–' : (isInferred(s.id) ? '≈' : '') + difficultyOf(s.id, session.players)}</span>
           <span class="grow" style="font-size: 15px; line-height: 1.3">{taskText(t)}</span>
           <button class="btn small" onclick={() => toggle(s.id, !!t?.rule)}>{i18n.t('remove')}</button>
         </div>
       {/each}
     </div>
   {/if}
+
+  <div class="panel">
+    <span class="label">{i18n.t('customTask')}</span>
+    <span class="small muted">{i18n.t('customHint')}</span>
+    <div class="row" style="gap: 8px">
+      <input class="input grow" placeholder="win P3 Y7" bind:value={custom} onkeydown={(e) => e.key === 'Enter' && addCustom()} />
+      <button class="btn small" disabled={!customResult || 'error' in customResult} onclick={addCustom}>{i18n.t('add')}</button>
+    </div>
+    {#if customResult}
+      {#if 'error' in customResult}
+        <span class="small" style="color: var(--bad-text)">{customResult.error.msg}</span>
+      {:else}
+        {@const t = customResult.ok}
+        <div class="row" style="gap: 10px">
+          <span class="diff">{t.rule ? '–' : (t.official ? '' : '≈') + t.difficulty![session.players - 3]}</span>
+          <span class="grow" style="display: flex; flex-direction: column; gap: 2px">
+            <span style="font-size: 15px; line-height: 1.3">{taskText(t)}</span>
+            <span class="row small muted" style="gap: 4px; flex-wrap: wrap">
+              {#each t.cards as c}<Card card={c} />{/each}
+              <code>{t.id}</code>
+            </span>
+          </span>
+        </div>
+      {/if}
+    {/if}
+    <details class="small muted">
+      <summary>{i18n.t('syntax')}</summary>
+      <span class="row" style="gap: 6px; flex-wrap: wrap; margin-top: 6px">
+        {#each SYNTAX as ex}<button class="cat" onclick={() => (custom = ex)}><code>{ex}</code></button>{/each}
+      </span>
+    </details>
+  </div>
 
   {#if category === 'rule'}<p class="small muted">{i18n.t('rulesNote')}</p>{/if}
 
@@ -93,7 +135,7 @@
     <div class="row between small">
       <span>
         <strong>{i18n.t('nTasks', { n: taskCount })}{ruleCount ? ` + ${ruleCount} ${i18n.t('ruleCards')}` : ''}</strong>
-        · {session.target ? i18n.t('difficultyOf', { sum, target: session.target }) : i18n.t('difficultySum', { sum })}
+        · {session.target ? i18n.t('difficultyOf', { sum: approx + sum, target: session.target }) : i18n.t('difficultySum', { sum: approx + sum })}
       </span>
       <label class="row small muted" style="gap: 4px">
         {i18n.t('target')}

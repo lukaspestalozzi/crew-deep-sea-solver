@@ -34,6 +34,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D14 | Languages | UI in German and English; code, files and notation in English only | German is a display concern |
 | D15 | Import / export | Every situation can be saved, exported and imported, including sealed hands | Backup, moving between devices; no cheating expected |
 | D16 | Submarines and numbers | Submarines do not count as numbers or in sum tasks | Confirmed by Q on 2026-10-24 |
+| D17 | Generalized tasks | Every task of the official categories as a parametric ID; inferred difficulty (rule of thumb, ≈) now, measured later; rule cards not generated; random draws and the default list use official cards only; official cards get marked once Q supplies the 96 | Decided by Q on 2026-10-24 |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -293,6 +294,7 @@ What the code in this repository does and does not yet cover, compared with this
 | Solver, draft search, smallest fix, smallest conflict, point of no return | Done |
 | Difficulty: draft robustness, critical decisions, tightness, printed sum, deal robustness | Done |
 | `crew 1` format, CLI (`solve`, `bench`) | Done |
+| Generated tasks: every task of the categories as a parametric ID (`win P3 Y7`, `tricks =3`, …), inferred difficulty marked ≈; random draws use official cards only; rule cards not generated | Done (D17); difficulty is a rule of thumb, measured values later |
 | Web app: all screens, EN/DE, IndexedDB, import/export, Web Worker, offline | Done; not yet tried on a real phone |
 | GitHub Pages deploy | Done |
 | Logbook draft modes (free distribution, one player, captain none, hardest first) | **Not implemented**: only the standard draft |

@@ -174,24 +174,32 @@ fn progress_fn(f: &JsValue) -> Option<js_sys::Function> {
 /// All task and rule cards.
 #[wasm_bindgen]
 pub fn catalogue_json() -> String {
-    let list: Vec<Value> = catalogue()
-        .iter()
-        .map(|t| {
-            json!({
-                "id": t.id,
-                "category": t.category,
-                "difficulty": t.difficulty,
-                "text_en": t.text_en,
-                "text_de": t.text_de,
-                "doubtful": t.doubtful,
-                "note": t.note,
-                "rule": t.is_rule(),
-                "captain_allowed": t.captain_allowed(),
-                "cards": named_cards(&t.kind).iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    ok(json!(list))
+    ok(json!(catalogue().iter().map(card_json).collect::<Vec<_>>()))
+}
+
+/// Any task by ID: an official card, or a generated one for a parametric ID.
+#[wasm_bindgen]
+pub fn task_info(id: &str) -> String {
+    match crew_core::catalogue::resolve(id) {
+        Ok(t) => ok(card_json(t)),
+        Err(e) => err(e),
+    }
+}
+
+fn card_json(t: &crew_core::catalogue::TaskCard) -> Value {
+    json!({
+        "id": t.id,
+        "category": t.category,
+        "difficulty": t.difficulty,
+        "text_en": t.text_en,
+        "text_de": t.text_de,
+        "doubtful": t.doubtful,
+        "note": t.note,
+        "rule": t.is_rule(),
+        "captain_allowed": t.captain_allowed(),
+        "cards": named_cards(&t.kind).iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "official": t.official,
+    })
 }
 
 /// Parse text with one or more situations into DTOs.
@@ -443,6 +451,17 @@ mod tests {
         assert_eq!(cards("win P7 with sub"), json!(["P7"]));
         assert_eq!(cards("only S2"), json!(["S2"]));
         assert_eq!(cards("no pink"), json!([]));
+    }
+
+    #[test]
+    fn task_info_generates_parametric_tasks() {
+        let g: Value = serde_json::from_str(&task_info("win P2 Y7")).unwrap();
+        assert_eq!(g["ok"]["official"], false);
+        assert_eq!(g["ok"]["cards"], json!(["P2", "Y7"]));
+        let o: Value = serde_json::from_str(&task_info("win Y7 B6")).unwrap();
+        assert_eq!((o["ok"]["id"].as_str(), o["ok"]["official"].as_bool()), (Some("win B6 Y7"), Some(true)));
+        let e: Value = serde_json::from_str(&task_info("win X9")).unwrap();
+        assert_eq!(e["error"]["msg"], "'X9' is not a card");
     }
 
     const TEXT: &str = "crew 1

@@ -152,7 +152,7 @@ fn parse_lines(lines: &[(usize, &str)]) -> Result<Situation, ParseError> {
                     "crew" => Owner::Crew,
                     k => Owner::Player(player_index(k).ok_or_else(|| err(ln, format!("unknown owner '{k}'")))?),
                 };
-                let card = catalogue::find(val).ok_or_else(|| err(ln, format!("unknown task '{val}'")))?;
+                let card = catalogue::resolve(val).map_err(|e| err(ln, e))?;
                 if card.is_rule() != (owner == Owner::Crew) {
                     return Err(err(
                         ln,
