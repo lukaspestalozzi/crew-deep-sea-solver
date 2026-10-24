@@ -1,0 +1,269 @@
+:root {
+  --bg: #0e1a24;
+  --surface: #16283a;
+  --surface-2: #23405a;
+  --line: #22384c;
+  --border: #2a4157;
+  --text: #e8eef2;
+  --muted: #9fb3c4;
+  --faint: #6f879b;
+  --accent: #f2b544;
+  --accent-ink: #0e1a24;
+  --good-bg: #173a2a;
+  --good-border: #2f6b4b;
+  --good-text: #cdebd8;
+  --good: #8fe0ae;
+  --bad-bg: #3a1a2a;
+  --bad-border: #7a3558;
+  --bad-text: #f7c3da;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: var(--accent);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.screen {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.wide {
+  max-width: 1440px;
+}
+
+.grow {
+  flex-grow: 1;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.between {
+  justify-content: space-between;
+}
+
+.cols-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 13px;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.panel {
+  background: var(--surface);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel.outline {
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+.panel.dashed {
+  background: transparent;
+  border: 1px dashed var(--border);
+}
+
+.btn {
+  min-height: 48px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-decoration: none;
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 0;
+  font-weight: 700;
+  font-size: 17px;
+  min-height: 52px;
+}
+
+.btn.outline-accent {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.small {
+  min-height: 40px;
+  font-size: 14px;
+  padding: 0 12px;
+}
+
+.icon-btn {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+}
+
+.seg {
+  display: flex;
+  gap: 2px;
+  background: var(--surface);
+  padding: 3px;
+  border-radius: 10px;
+}
+
+.seg button {
+  min-width: 44px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.seg button[aria-checked='true'] {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.pill {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--accent-ink);
+}
+
+.chip-card {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--accent-ink);
+}
+
+.input {
+  min-height: 46px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 16px;
+  width: 100%;
+}
+
+textarea.input {
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.error {
+  color: var(--bad-text);
+  background: var(--bad-bg);
+  border: 1px solid var(--bad-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.progress {
+  height: 8px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  background: var(--accent);
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}

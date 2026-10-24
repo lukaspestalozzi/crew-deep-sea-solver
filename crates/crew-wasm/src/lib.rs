@@ -388,6 +388,27 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32) -> String {
     }
 }
 
+/// A random deal with task cards drawn to the difficulty `target` (owners `?`), as text.
+#[wasm_bindgen]
+pub fn random_situation(players: u32, target: u32, seed: u32) -> String {
+    use crew_core::game::Game;
+    use crew_core::rng::Rng;
+    let players = players.clamp(3, 5) as usize;
+    let mut rng = Rng::new(seed as u64 ^ 0x5EED);
+    let hands = Game::random_hands(players, &mut rng);
+    let Some(cards) = crew_core::draft::draw_tasks(catalogue(), players, target, &mut rng) else {
+        return err(format!("could not draw tasks for difficulty {target}"));
+    };
+    let s = Situation {
+        title: Some(format!("Random · {players} players · difficulty {target}")),
+        target: Some(target),
+        hands,
+        tasks: cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect(),
+        ..Situation::default()
+    };
+    ok(json!(notation::write(&s)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

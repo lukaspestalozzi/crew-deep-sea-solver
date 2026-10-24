@@ -1,0 +1,11 @@
+{
+  "name": "Deep Sea Solver",
+  "short_name": "Deep Sea",
+  "description": "Feasibility and difficulty for The Crew: Mission Deep Sea",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0E1A24",
+  "theme_color": "#0E1A24",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
