@@ -8,7 +8,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { Cancelled, SolverClient, type DraftsOut, type NoReturnOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
   import { textOf } from '../lib/tasks';
-  import { check, parse, type Situation } from '../lib/wasm';
+  import { check, parse, toText, type Situation } from '../lib/wasm';
 
   type Verdict = 'feasible' | 'infeasible' | 'redeal' | null;
 
@@ -37,6 +37,7 @@
   let tight = $state<TightnessOut | null>(null);
   let robustness = $state<{ solvable: number; deals: number } | null>(null);
   let robustRunning = $state(false);
+  let robustProgress = $state('');
   let step = $state<number | null>(null);
 
   const unknownOwners = $derived(!!situation?.tasks.some((t) => t.owner === '?'));
@@ -107,6 +108,12 @@
     try {
       if (unknownOwners) {
         drafts = await client.call<DraftsOut>('drafts', [text, false, LIMIT], draftProgress);
+        const ex = drafts.example;
+        if (ex) {
+          // Tightness along the shown line, for the draft that produced it.
+          const owned = toText({ ...situation, tasks: situation.tasks.map((t, i) => ({ ...t, owner: ex.owners[i] })) });
+          tight = await client.call<TightnessOut | null>('tightness', [owned, JSON.stringify(ex.line)]);
+        }
       } else {
         solveOut = await client.call<SolveOut>('solve', [text], nodes);
         if (solveOut.verdict === 'feasible') {
@@ -141,11 +148,19 @@
 
   async function testDeals() {
     robustRunning = true;
+    robustProgress = '';
     try {
-      robustness = await client.call('deal_robustness', [text, 100, Math.floor(Math.random() * 1e9)]);
-    } catch {
-      /* cancelled */
+      robustness = await client.call('deal_robustness', [text, 100, Math.floor(Math.random() * 1e9)], (a, b) => {
+        robustProgress = i18n.t('dealsTested', { a, b });
+      });
+    } catch (e) {
+      if (!(e instanceof Cancelled)) error = String(e instanceof Error ? e.message : e);
     }
+    robustRunning = false;
+  }
+
+  function cancelDeals() {
+    client.cancel();
     robustRunning = false;
   }
 
@@ -267,10 +282,13 @@
           <span class="small muted">{i18n.t('randomDeals')}</span>
           {#if robustness}
             <strong>{robustness.solvable} / {robustness.deals}</strong>
+          {:else if robustRunning}
+            <span class="row small" style="gap: 8px">
+              <span class="muted">{robustProgress || i18n.t('computing')}</span>
+              <button class="btn small" onclick={cancelDeals}>{i18n.t('cancel')}</button>
+            </span>
           {:else}
-            <button class="btn small outline-accent" disabled={robustRunning || running} onclick={testDeals}>
-              {robustRunning ? i18n.t('computing') : i18n.t('testDeals', { n: 100 })}
-            </button>
+            <button class="btn small outline-accent" disabled={running} onclick={testDeals}>{i18n.t('testDeals', { n: 100 })}</button>
           {/if}
         </span>
       </div>

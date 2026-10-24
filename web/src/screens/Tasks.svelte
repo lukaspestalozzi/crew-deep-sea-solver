@@ -1,10 +1,9 @@
 <script lang="ts">
   import Header from '../components/Header.svelte';
-  import Card from '../components/Card.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { router, session } from '../lib/state.svelte';
   import { CATEGORIES, categoryName, difficultyOf, drawToTarget, taskText } from '../lib/tasks';
-  import { getCatalogue } from '../lib/wasm';
+  import { getCatalogue, taskById } from '../lib/wasm';
 
   let query = $state('');
   let category = $state<string | null>(null);
@@ -37,9 +36,6 @@
     const known = new Set(session.tasks.map((t) => t.id));
     session.tasks = [...session.tasks, ...ids.filter((id) => !known.has(id)).map((id) => ({ id, owner: '?' }))];
   }
-
-  // Card ids in a task id are shown as coloured chips.
-  const cardPattern = /^[PBGYS][1-9]$/;
 </script>
 
 <main class="screen">
@@ -57,6 +53,20 @@
     {/each}
   </div>
 
+  {#if session.tasks.length}
+    <div class="panel">
+      <span class="label">{i18n.t('selectedTasks')}</span>
+      {#each session.tasks as s (s.id)}
+        {@const t = taskById(s.id)}
+        <div class="row" style="gap: 10px">
+          <span class="diff" aria-label={i18n.t('difficulty')}>{t?.rule ? '–' : difficultyOf(s.id, session.players)}</span>
+          <span class="grow" style="font-size: 15px; line-height: 1.3">{taskText(t)}</span>
+          <button class="btn small" onclick={() => toggle(s.id, !!t?.rule)}>{i18n.t('remove')}</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if category === 'rule'}<p class="small muted">{i18n.t('rulesNote')}</p>{/if}
 
   <div style="display: flex; flex-direction: column">
@@ -65,10 +75,8 @@
         <span class="diff" aria-label={i18n.t('difficulty')}>{t.rule ? '–' : t.difficulty![session.players - 3]}</span>
         <span class="grow" style="display: flex; flex-direction: column; gap: 2px">
           <span style="font-size: 15px; line-height: 1.3">{taskText(t)}</span>
-          <span class="row small muted" style="gap: 4px; flex-wrap: wrap">
-            {#each t.id.split(' ') as part}
-              {#if cardPattern.test(part)}<Card card={part} />{:else}<span>{part}</span>{/if}
-            {/each}
+          <span class="small muted">
+            <code>{t.id}</code>
             {#if t.doubtful}<span title={t.note ?? ''} style="color: var(--accent)">· {i18n.t('doubtful')}</span>{/if}
           </span>
         </span>

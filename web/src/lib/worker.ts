@@ -28,7 +28,7 @@ self.onmessage = async (e: MessageEvent<Call>) => {
         out = w.tightness(args[0] as string, args[1] as string);
         break;
       case 'deal_robustness':
-        out = w.deal_robustness(args[0] as string, args[1] as number, args[2] as number);
+        out = w.deal_robustness(args[0] as string, args[1] as number, args[2] as number, progress);
         break;
       default:
         out = JSON.stringify({ error: { msg: `unknown function ${fn}` } });

@@ -373,13 +373,17 @@ pub fn deal_robustness(
     drafts_per_deal: usize,
     seed: u64,
     cancel: Option<&AtomicBool>,
+    progress: Option<&dyn Fn(usize, usize)>,
 ) -> Option<(usize, usize)> {
     use crate::game::Game;
     use crate::situation::Assignment;
     let mut rng = Rng::new(seed);
     let opts = Options { cancel, ..Options::default() };
     let mut ok = 0;
-    for _ in 0..deals {
+    for d in 0..deals {
+        if let Some(f) = progress {
+            f(d, deals);
+        }
         let hands = Game::random_hands(players, &mut rng);
         let captain = Game::new(&hands).unwrap().captain as usize;
         let mut s = Situation {
@@ -528,10 +532,10 @@ tasks:
     #[test]
     fn deal_robustness_of_an_easy_and_an_impossible_set() {
         let easy = [crate::catalogue::find("first-trick").unwrap()];
-        assert_eq!(deal_robustness(&easy, 4, 10, 5, 1, None), Some((10, 10)));
+        assert_eq!(deal_robustness(&easy, 4, 10, 5, 1, None, None), Some((10, 10)));
         let clash = [crate::catalogue::find("first-trick").unwrap(), crate::catalogue::find("first 2").unwrap()];
         // Same player may take both only with 2 tasks per seat; with 4 players each takes one.
-        assert_eq!(deal_robustness(&clash, 4, 5, 5, 1, None), Some((0, 5)));
+        assert_eq!(deal_robustness(&clash, 4, 5, 5, 1, None, None), Some((0, 5)));
     }
 
     #[test]

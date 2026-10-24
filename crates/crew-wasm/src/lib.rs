@@ -300,6 +300,7 @@ pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&d
                 }
                 json!({
                     "owners": owners.iter().map(|&o| owner_str(o)).collect::<Vec<_>>(),
+                    "line": line.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
                     "tricks": line_tricks(&d, line),
                 })
             };
@@ -378,12 +379,18 @@ pub fn tightness(text: &str, line_json: &str) -> String {
 
 /// Share of random deals on which the situation's task cards can be fulfilled.
 #[wasm_bindgen]
-pub fn deal_robustness(text: &str, deals: u32, seed: u32) -> String {
+pub fn deal_robustness(text: &str, deals: u32, seed: u32, progress: JsValue) -> String {
+    let cb = progress_fn(&progress);
+    let report = |done: usize, total: usize| {
+        if let Some(f) = &cb {
+            let _ = f.call2(&JsValue::NULL, &JsValue::from_f64(done as f64), &JsValue::from_f64(total as f64));
+        }
+    };
     match situation(text) {
         Err(e) => err(e),
         Ok(s) => {
             let cards: Vec<_> = s.tasks.iter().filter(|a| !a.card.is_rule()).map(|a| a.card).collect();
-            match analysis::deal_robustness(&cards, s.players(), deals as usize, 20, seed as u64, None) {
+            match analysis::deal_robustness(&cards, s.players(), deals as usize, 20, seed as u64, None, Some(&report)) {
                 Some((good, total)) => ok(json!({ "solvable": good, "deals": total })),
                 None => ok(Value::Null),
             }

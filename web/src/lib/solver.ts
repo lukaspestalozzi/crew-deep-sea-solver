@@ -74,6 +74,7 @@ export type SolveOut =
 
 export interface DraftLine {
   owners: string[];
+  line: string[];
   tricks: TrickOut[];
   distance?: number;
 }
