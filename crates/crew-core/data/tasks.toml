@@ -12,13 +12,12 @@
 
 # ---------------------------------------------------------------- win cards
 [[task]]
-id = "win P1"
+id = "win P3"
 category = "cards"
 difficulty = [1, 1, 1]
-text_en = "I will win P1."
-doubtful = true
-note = "Fan list says pink 3, remigerme's code uses pink 1."
-kind = { type = "win_cards", cards = ["P1"] }
+text_en = "I will win P3."
+note = "P3 confirmed by Q (remigerme's code had pink 1)."
+kind = { type = "win_cards", cards = ["P3"] }
 
 [[task]]
 id = "win Y1"
