@@ -65,7 +65,7 @@ pub fn winning_position(cards: &[Card]) -> usize {
     best
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Game {
     pub n: usize,
     pub captain: u8,

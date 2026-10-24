@@ -3,5 +3,7 @@
 pub mod card;
 pub mod catalogue;
 pub mod game;
+pub mod notation;
 pub mod rng;
+pub mod situation;
 pub mod task;
