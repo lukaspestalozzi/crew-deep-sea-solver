@@ -149,6 +149,13 @@
     robustRunning = false;
   }
 
+  // One entry per task: the players for whom it is impossible alone.
+  function impossibleByTask(d: DraftsOut): [number, number[]][] {
+    const m = new Map<number, number[]>();
+    for (const { task, player } of d.impossible_pairs) m.set(task, [...(m.get(task) ?? []), player]);
+    return [...m];
+  }
+
   const draftLine = (d: DraftsOut) =>
     d.sampled
       ? i18n.t('draftsWorkSampled', { pct: Math.round((100 * d.working) / Math.max(1, d.checked)), n: d.total, k: d.checked })
@@ -195,9 +202,12 @@
     <div class="panel">
       <span class="label">{i18n.t('otherDrafts')}</span>
       <span>{draftLine(d)}</span>
-      {#each d.impossible_pairs as ip}
-        <span class="small muted">{i18n.t('impossibleAlone')}: {i18n.player(ip.player)} · {textOf(situation.tasks[ip.task].id)}</span>
-      {/each}
+      {#if d.impossible_pairs.length}
+        <span class="small muted" style="margin-top: 4px">{i18n.t('impossibleAlone')}:</span>
+        {#each impossibleByTask(d) as [task, players]}
+          <span class="small muted">{textOf(situation.tasks[task].id)} — {players.map((p) => i18n.player(p)).join(', ')}</span>
+        {/each}
+      {/if}
       {#if altDrafts?.closest && altDrafts.closest.distance && verdict === 'infeasible'}
         <span class="small" style="margin-top: 4px"><strong>{i18n.t('smallestChange')}</strong> ({i18n.t('changesOwner', { n: altDrafts.closest.distance })}):</span>
         {#each situation.tasks as t, i}
