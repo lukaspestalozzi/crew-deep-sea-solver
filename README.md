@@ -14,6 +14,9 @@ legal line of play (perfect information) and answers:
 Mission Deep Sea only, 3–5 players. Communication and the distress signal are
 not modelled: they do not change which plays are legal.
 
+The design and every product decision are in [`spec/design-spec.md`](spec/design-spec.md),
+including what is not implemented yet.
+
 ## Parts
 
 | Path | What |
