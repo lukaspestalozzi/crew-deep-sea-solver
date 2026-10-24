@@ -222,19 +222,19 @@ impl Game {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
 
-    fn cs(s: &str) -> CardSet {
+    pub fn cs(s: &str) -> CardSet {
         s.split_whitespace().map(|t| Card::parse(t).unwrap()).collect()
     }
 
-    fn c(s: &str) -> Card {
+    pub fn c(s: &str) -> Card {
         Card::parse(s).unwrap()
     }
 
-    /// Fixed 4-player deal used in the mockups.
-    pub(crate) fn mock_deal() -> Vec<CardSet> {
+    /// Fixed 4-player deal used in the mockups. Player1 holds S4.
+    pub fn mock_deal() -> Vec<CardSet> {
         vec![
             cs("P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4"),
             cs("P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1"),
@@ -242,6 +242,12 @@ mod tests {
             cs("P4 P7 P9 B5 B7 G3 G7 Y4 Y5 Y9"),
         ]
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::*;
+    use super::*;
 
     #[test]
     fn deal_validation() {

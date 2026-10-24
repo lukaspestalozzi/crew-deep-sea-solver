@@ -1,0 +1,760 @@
+# Task cards of The Crew: Mission Deep Sea.
+#
+# PLACEHOLDER DATA: texts and difficulty values come from the fan-made list on
+# BoardGameGeek (thread 2631311), via remigerme/the-crew-solver. They will be
+# replaced by transcriptions of the German edition. Entries marked
+# `doubtful = true` disagree between sources or have unclear rules.
+#
+# Card selectors in `cards`: a card ("B4"), a whole suit ("P", "S"), or a
+# value ("9" = the four colour cards of that value, no submarines).
+#
+# difficulty = [3 players, 4 players, 5 players]; rule cards have none.
+
+# ---------------------------------------------------------------- win cards
+[[task]]
+id = "win P1"
+category = "cards"
+difficulty = [1, 1, 1]
+text_en = "I will win P1."
+doubtful = true
+note = "Fan list says pink 3, remigerme's code uses pink 1."
+kind = { type = "win_cards", cards = ["P1"] }
+
+[[task]]
+id = "win Y1"
+category = "cards"
+difficulty = [1, 1, 1]
+text_en = "I will win Y1."
+kind = { type = "win_cards", cards = ["Y1"] }
+
+[[task]]
+id = "win B4"
+category = "cards"
+difficulty = [1, 1, 1]
+text_en = "I will win B4."
+kind = { type = "win_cards", cards = ["B4"] }
+
+[[task]]
+id = "win G6"
+category = "cards"
+difficulty = [1, 1, 1]
+text_en = "I will win G6."
+kind = { type = "win_cards", cards = ["G6"] }
+
+[[task]]
+id = "win all 3s"
+category = "cards"
+difficulty = [3, 4, 5]
+text_en = "I will win all four 3s."
+kind = { type = "win_cards", cards = ["3"] }
+
+[[task]]
+id = "win all 9s"
+category = "cards"
+difficulty = [4, 5, 6]
+text_en = "I will win all four 9s."
+kind = { type = "win_cards", cards = ["9"] }
+
+[[task]]
+id = "win B1 B2 B3"
+category = "cards"
+difficulty = [2, 3, 3]
+text_en = "I will win B1, B2 and B3."
+kind = { type = "win_cards", cards = ["B1", "B2", "B3"] }
+
+[[task]]
+id = "win B6 Y7"
+category = "cards"
+difficulty = [2, 2, 3]
+text_en = "I will win B6 and Y7."
+kind = { type = "win_cards", cards = ["B6", "Y7"] }
+
+[[task]]
+id = "win P5 Y6"
+category = "cards"
+difficulty = [2, 2, 3]
+text_en = "I will win P5 and Y6."
+kind = { type = "win_cards", cards = ["P5", "Y6"] }
+
+[[task]]
+id = "win G5 B8"
+category = "cards"
+difficulty = [2, 2, 3]
+text_en = "I will win G5 and B8."
+kind = { type = "win_cards", cards = ["G5", "B8"] }
+
+[[task]]
+id = "win B5 P8"
+category = "cards"
+difficulty = [2, 2, 3]
+text_en = "I will win B5 and P8."
+kind = { type = "win_cards", cards = ["B5", "P8"] }
+
+[[task]]
+id = "win P9 Y8"
+category = "cards"
+difficulty = [2, 2, 3]
+text_en = "I will win P9 and Y8."
+kind = { type = "win_cards", cards = ["P9", "Y8"] }
+
+[[task]]
+id = "win P1 G7"
+category = "cards"
+difficulty = [2, 2, 2]
+text_en = "I will win P1 and G7."
+kind = { type = "win_cards", cards = ["P1", "G7"] }
+
+[[task]]
+id = "win Y9 B7"
+category = "cards"
+difficulty = [2, 3, 3]
+text_en = "I will win Y9 and B7."
+kind = { type = "win_cards", cards = ["Y9", "B7"] }
+
+[[task]]
+id = "win G3 Y4 Y5"
+category = "cards"
+difficulty = [3, 4, 4]
+text_en = "I will win G3, Y4 and Y5."
+kind = { type = "win_cards", cards = ["G3", "Y4", "Y5"] }
+
+[[task]]
+id = "win S3"
+category = "cards"
+difficulty = [1, 1, 1]
+text_en = "I will win submarine 3."
+kind = { type = "win_cards", cards = ["S3"] }
+
+# ---------------------------------------------------------------- win none
+[[task]]
+id = "no pink"
+category = "none"
+difficulty = [2, 2, 2]
+text_en = "I will win no pink cards."
+kind = { type = "win_none", cards = ["P"] }
+
+[[task]]
+id = "no green"
+category = "none"
+difficulty = [2, 2, 2]
+text_en = "I will win no green cards."
+kind = { type = "win_none", cards = ["G"] }
+
+[[task]]
+id = "no yellow"
+category = "none"
+difficulty = [2, 2, 2]
+text_en = "I will win no yellow cards."
+kind = { type = "win_none", cards = ["Y"] }
+
+[[task]]
+id = "no pink blue"
+category = "none"
+difficulty = [3, 3, 3]
+text_en = "I will win no pink and no blue cards."
+kind = { type = "win_none", cards = ["P", "B"] }
+
+[[task]]
+id = "no yellow green"
+category = "none"
+difficulty = [3, 3, 3]
+text_en = "I will win no yellow and no green cards."
+kind = { type = "win_none", cards = ["Y", "G"] }
+
+[[task]]
+id = "no subs"
+category = "none"
+difficulty = [1, 1, 1]
+text_en = "I will win no submarines."
+kind = { type = "win_none", cards = ["S"] }
+
+[[task]]
+id = "no 9s"
+category = "none"
+difficulty = [1, 1, 1]
+text_en = "I will win no 9s."
+kind = { type = "win_none", cards = ["9"] }
+
+[[task]]
+id = "no 8s 9s"
+category = "none"
+difficulty = [3, 3, 2]
+text_en = "I will win no 8s and no 9s."
+kind = { type = "win_none", cards = ["8", "9"] }
+
+[[task]]
+id = "no 5s"
+category = "none"
+difficulty = [1, 2, 2]
+text_en = "I will win no 5s."
+kind = { type = "win_none", cards = ["5"] }
+
+[[task]]
+id = "no 1s"
+category = "none"
+difficulty = [2, 2, 2]
+text_en = "I will win no 1s."
+doubtful = true
+note = "Unclear whether submarine 1 counts; implemented as colour cards only."
+kind = { type = "win_none", cards = ["1"] }
+
+[[task]]
+id = "no 1s 2s 3s"
+category = "none"
+difficulty = [3, 3, 3]
+text_en = "I will win no 1s, 2s or 3s."
+doubtful = true
+note = "Unclear whether submarines 1-3 count; implemented as colour cards only."
+kind = { type = "win_none", cards = ["1", "2", "3"] }
+
+# ---------------------------------------------------------------- never lead
+[[task]]
+id = "no-lead pink green"
+category = "lead"
+difficulty = [2, 1, 1]
+text_en = "I will not open a trick with pink or green."
+kind = { type = "no_lead", cards = ["P", "G"] }
+
+[[task]]
+id = "no-lead pink yellow blue"
+category = "lead"
+difficulty = [4, 3, 3]
+text_en = "I will not open a trick with pink, yellow or blue."
+kind = { type = "no_lead", cards = ["P", "Y", "B"] }
+
+# ---------------------------------------------------------------- win with a value
+[[task]]
+id = "win with 6"
+category = "with"
+difficulty = [2, 3, 3]
+text_en = "I will win a trick with a 6."
+kind = { type = "win_with", value = 6 }
+
+[[task]]
+id = "win with 5"
+category = "with"
+difficulty = [2, 3, 4]
+text_en = "I will win a trick with a 5."
+kind = { type = "win_with", value = 5 }
+
+[[task]]
+id = "win with 3"
+category = "with"
+difficulty = [3, 4, 5]
+text_en = "I will win a trick with a 3."
+doubtful = true
+note = "Unclear whether submarine 3 counts; implemented as colour cards only."
+kind = { type = "win_with", value = 3 }
+
+[[task]]
+id = "win with 2"
+category = "with"
+difficulty = [3, 4, 5]
+text_en = "I will win a trick with a 2."
+doubtful = true
+note = "Unclear whether submarine 2 counts; implemented as colour cards only."
+kind = { type = "win_with", value = 2 }
+
+[[task]]
+id = "win 5 with 7"
+category = "with"
+difficulty = [1, 2, 2]
+text_en = "I will win a 5 with a 7."
+kind = { type = "win_with", value = 7, containing = 5 }
+
+[[task]]
+id = "win 8 with 4"
+category = "with"
+difficulty = [3, 4, 5]
+text_en = "I will win an 8 with a 4."
+kind = { type = "win_with", value = 4, containing = 8 }
+
+[[task]]
+id = "win 6 with 6"
+category = "with"
+difficulty = [2, 3, 4]
+text_en = "I will win a 6 with another 6."
+kind = { type = "win_with", value = 6, containing = 6 }
+
+# ---------------------------------------------------------------- compared with the captain
+[[task]]
+id = "more than captain"
+category = "captain"
+difficulty = [2, 2, 3]
+text_en = "I will win more tricks than the captain."
+kind = { type = "vs_captain", cmp = "more" }
+
+[[task]]
+id = "fewer than captain"
+category = "captain"
+difficulty = [2, 2, 2]
+text_en = "I will win fewer tricks than the captain."
+kind = { type = "vs_captain", cmp = "fewer" }
+
+[[task]]
+id = "same as captain"
+category = "captain"
+difficulty = [4, 3, 3]
+text_en = "I will win as many tricks as the captain."
+kind = { type = "vs_captain", cmp = "same" }
+
+# ---------------------------------------------------------------- trick with a property
+[[task]]
+id = "trick below 7"
+category = "trick"
+difficulty = [2, 3, 3]
+text_en = "I will win a trick whose cards are all below 7 (no submarines)."
+kind = { type = "trick", prop = { type = "all_below", bound = 7 } }
+
+[[task]]
+id = "trick above 5"
+category = "trick"
+difficulty = [2, 3, 4]
+text_en = "I will win a trick whose cards are all above 5 (no submarines)."
+kind = { type = "trick", prop = { type = "all_above", bound = 5 } }
+
+[[task]]
+id = "trick even"
+category = "trick"
+difficulty = [2, 5, 6]
+text_en = "I will win a trick of only even cards."
+kind = { type = "trick", prop = { type = "all_even" } }
+
+[[task]]
+id = "trick odd"
+category = "trick"
+difficulty = [2, 4, 5]
+text_en = "I will win a trick of only odd cards."
+kind = { type = "trick", prop = { type = "all_odd" } }
+
+[[task]]
+id = "trick sum high"
+category = "trick"
+difficulty = [3, 3, 4]
+text_en = "I will win a trick with a total above 23 / 28 / 31 (3 / 4 / 5 players, no submarines)."
+kind = { type = "trick", prop = { type = "sum_above", bounds = [23, 28, 31] } }
+
+[[task]]
+id = "trick sum low"
+category = "trick"
+difficulty = [3, 3, 4]
+text_en = "I will win a trick with a total below 8 / 12 / 16 (3 / 4 / 5 players, no submarines)."
+kind = { type = "trick", prop = { type = "sum_below", bounds = [8, 12, 16] } }
+
+[[task]]
+id = "trick sum 22-23"
+category = "trick"
+difficulty = [3, 3, 4]
+text_en = "I will win a trick with a total of 22 or 23 (no submarines)."
+doubtful = true
+note = "Unclear whether submarines are excluded; implemented as excluded."
+kind = { type = "trick", prop = { type = "sum_in", values = [22, 23] } }
+
+[[task]]
+id = "trick green=yellow"
+category = "trick"
+difficulty = [2, 3, 3]
+text_en = "I will win a trick with as many green as yellow cards (at least one each)."
+kind = { type = "trick", prop = { type = "same_count", a = "G", b = "Y" } }
+
+[[task]]
+id = "trick pink=blue"
+category = "trick"
+difficulty = [2, 3, 3]
+text_en = "I will win a trick with as many pink as blue cards (at least one each)."
+kind = { type = "trick", prop = { type = "same_count", a = "P", b = "B" } }
+
+[[task]]
+id = "win P7 with sub"
+category = "trick"
+difficulty = [3, 3, 3]
+text_en = "I will win P7 with a submarine."
+kind = { type = "trick", prop = { type = "card_won_by_sub", card = "P7" } }
+
+[[task]]
+id = "win G9 with sub"
+category = "trick"
+difficulty = [3, 3, 3]
+text_en = "I will win G9 with a submarine."
+kind = { type = "trick", prop = { type = "card_won_by_sub", card = "G9" } }
+
+[[task]]
+id = "win G2 last"
+category = "trick"
+difficulty = [3, 4, 5]
+text_en = "I will win G2 in the last trick."
+kind = { type = "trick", prop = { type = "card_in_last_trick", card = "G2" } }
+
+# ---------------------------------------------------------------- don't win certain tricks
+[[task]]
+id = "none of first 3"
+category = "not-first"
+difficulty = [1, 2, 2]
+text_en = "I will win none of the first 3 tricks."
+doubtful = true
+note = "Fan list says 1/2/2, remigerme's code says 2/3/3."
+kind = { type = "none_of_first", k = 3 }
+
+[[task]]
+id = "none of first 4"
+category = "not-first"
+difficulty = [1, 2, 3]
+text_en = "I will win none of the first 4 tricks."
+kind = { type = "none_of_first", k = 4 }
+
+[[task]]
+id = "none of first 5"
+category = "not-first"
+difficulty = [2, 3, 3]
+text_en = "I will win none of the first 5 tricks."
+kind = { type = "none_of_first", k = 5 }
+
+[[task]]
+id = "tricks =0"
+category = "not-first"
+difficulty = [4, 3, 3]
+text_en = "I will win no tricks."
+kind = { type = "exact_tricks", n = 0 }
+
+# ---------------------------------------------------------------- win specific tricks
+[[task]]
+id = "first-trick"
+category = "tricks"
+difficulty = [1, 1, 1]
+text_en = "I will win the first trick."
+kind = { type = "win_tricks", first = 1 }
+
+[[task]]
+id = "first 2"
+category = "tricks"
+difficulty = [1, 1, 2]
+text_en = "I will win the first 2 tricks."
+kind = { type = "win_tricks", first = 2 }
+
+[[task]]
+id = "first 3"
+category = "tricks"
+difficulty = [2, 3, 4]
+text_en = "I will win the first 3 tricks."
+kind = { type = "win_tricks", first = 3 }
+
+[[task]]
+id = "last-trick"
+category = "tricks"
+difficulty = [2, 3, 3]
+text_en = "I will win the last trick."
+kind = { type = "win_tricks", last = true }
+
+[[task]]
+id = "first+last"
+category = "tricks"
+difficulty = [3, 4, 4]
+text_en = "I will win the first and the last trick."
+kind = { type = "win_tricks", first = 1, last = true }
+
+[[task]]
+id = "only first"
+category = "tricks"
+difficulty = [4, 3, 3]
+text_en = "I will win only the first trick."
+kind = { type = "win_tricks", first = 1, only = true }
+
+[[task]]
+id = "only last"
+category = "tricks"
+difficulty = [4, 4, 4]
+text_en = "I will win only the last trick."
+kind = { type = "win_tricks", last = true, only = true }
+
+# ---------------------------------------------------------------- number of tricks
+[[task]]
+id = "tricks =1"
+category = "number"
+difficulty = [3, 2, 2]
+text_en = "I will win exactly 1 trick."
+kind = { type = "exact_tricks", n = 1 }
+
+[[task]]
+id = "tricks =2"
+category = "number"
+difficulty = [2, 2, 2]
+text_en = "I will win exactly 2 tricks."
+kind = { type = "exact_tricks", n = 2 }
+
+[[task]]
+id = "tricks =4"
+category = "number"
+difficulty = [2, 3, 5]
+text_en = "I will win exactly 4 tricks."
+kind = { type = "exact_tricks", n = 4 }
+
+[[task]]
+id = "predict"
+category = "number"
+difficulty = [3, 2, 2]
+text_en = "I will win X tricks (predicted openly)."
+kind = { type = "predict" }
+
+[[task]]
+id = "predict secret"
+category = "number"
+difficulty = [4, 3, 3]
+text_en = "I will win X tricks (predicted secretly)."
+kind = { type = "predict" }
+
+# ---------------------------------------------------------------- colour counts
+[[task]]
+id = "exactly 1 pink 1 green"
+category = "counts"
+difficulty = [4, 4, 4]
+text_en = "I will win exactly one pink and one green card."
+kind = { type = "suit_counts", counts = [["P", 1], ["G", 1]], exact = true }
+
+[[task]]
+id = "at least 7 yellow"
+category = "counts"
+difficulty = [3, 3, 3]
+text_en = "I will win at least 7 yellow cards."
+kind = { type = "suit_counts", counts = [["Y", 7]], exact = false }
+
+[[task]]
+id = "at least 5 pink"
+category = "counts"
+difficulty = [2, 3, 3]
+text_en = "I will win at least 5 pink cards."
+kind = { type = "suit_counts", counts = [["P", 5]], exact = false }
+
+[[task]]
+id = "exactly 2 green"
+category = "counts"
+difficulty = [3, 4, 4]
+text_en = "I will win exactly 2 green cards."
+kind = { type = "suit_counts", counts = [["G", 2]], exact = true }
+
+[[task]]
+id = "exactly 2 blue"
+category = "counts"
+difficulty = [3, 4, 4]
+text_en = "I will win exactly 2 blue cards."
+kind = { type = "suit_counts", counts = [["B", 2]], exact = true }
+
+[[task]]
+id = "exactly 1 pink"
+category = "counts"
+difficulty = [3, 3, 4]
+text_en = "I will win exactly 1 pink card."
+kind = { type = "suit_counts", counts = [["P", 1]], exact = true }
+
+[[task]]
+id = "one of each colour"
+category = "counts"
+difficulty = [2, 3, 4]
+text_en = "I will win at least one card of each colour."
+kind = { type = "suit_counts", counts = [["P", 1], ["B", 1], ["G", 1], ["Y", 1]], exact = false }
+
+[[task]]
+id = "exactly 1 sub"
+category = "counts"
+difficulty = [3, 3, 3]
+text_en = "I will win exactly 1 submarine."
+redeal_if = [["S1", "S2", "S3", "S4"]]
+kind = { type = "suit_counts", counts = [["S", 1]], exact = true }
+
+[[task]]
+id = "exactly 2 subs"
+category = "counts"
+difficulty = [3, 3, 4]
+text_en = "I will win exactly 2 submarines."
+redeal_if = [["S2", "S3", "S4"]]
+kind = { type = "suit_counts", counts = [["S", 2]], exact = true }
+
+[[task]]
+id = "exactly 3 subs"
+category = "counts"
+difficulty = [3, 4, 4]
+text_en = "I will win exactly 3 submarines."
+redeal_if = [["S1", "S2", "S3", "S4"]]
+kind = { type = "suit_counts", counts = [["S", 3]], exact = true }
+
+# ---------------------------------------------------------------- value counts
+[[task]]
+id = "at least three 5s"
+category = "values"
+difficulty = [3, 4, 5]
+text_en = "I will win at least three 5s."
+kind = { type = "value_count", value = 5, n = 3, exact = false }
+
+[[task]]
+id = "at least three 9s"
+category = "values"
+difficulty = [3, 4, 5]
+text_en = "I will win at least three 9s."
+kind = { type = "value_count", value = 9, n = 3, exact = false }
+
+[[task]]
+id = "at least two 7s"
+category = "values"
+difficulty = [2, 2, 2]
+text_en = "I will win at least two 7s."
+kind = { type = "value_count", value = 7, n = 2, exact = false }
+
+[[task]]
+id = "exactly three 6s"
+category = "values"
+difficulty = [3, 4, 4]
+text_en = "I will win exactly three 6s."
+kind = { type = "value_count", value = 6, n = 3, exact = true }
+
+[[task]]
+id = "exactly two 9s"
+category = "values"
+difficulty = [2, 3, 3]
+text_en = "I will win exactly two 9s."
+kind = { type = "value_count", value = 9, n = 2, exact = true }
+
+# ---------------------------------------------------------------- tricks in a row
+[[task]]
+id = "row 2"
+category = "row"
+difficulty = [1, 1, 1]
+text_en = "I will win 2 tricks in a row."
+kind = { type = "in_a_row", n = 2, exact = false }
+
+[[task]]
+id = "row 3"
+category = "row"
+difficulty = [2, 3, 4]
+text_en = "I will win 3 tricks in a row."
+kind = { type = "in_a_row", n = 3, exact = false }
+
+[[task]]
+id = "exactly row 3"
+category = "row"
+difficulty = [3, 3, 4]
+text_en = "I will win exactly 3 tricks, in a row."
+doubtful = true
+note = "Read as: exactly 3 tricks in total, all consecutive."
+kind = { type = "in_a_row", n = 3, exact = true }
+
+[[task]]
+id = "exactly row 2"
+category = "row"
+difficulty = [3, 3, 3]
+text_en = "I will win exactly 2 tricks, in a row."
+doubtful = true
+note = "Read as: exactly 2 tricks in total, consecutive."
+kind = { type = "in_a_row", n = 2, exact = true }
+
+[[task]]
+id = "no row"
+category = "row"
+difficulty = [3, 2, 2]
+text_en = "I will never win 2 tricks in a row."
+kind = { type = "no_two_in_a_row" }
+
+# ---------------------------------------------------------------- other
+[[task]]
+id = "only S1"
+category = "other"
+difficulty = [3, 3, 3]
+text_en = "I will win submarine 1 and no other submarine."
+redeal_if = [["S1", "S4"], ["S1", "S2", "S3"]]
+kind = { type = "only_sub", v = 1 }
+
+[[task]]
+id = "only S2"
+category = "other"
+difficulty = [3, 3, 3]
+text_en = "I will win submarine 2 and no other submarine."
+redeal_if = [["S2", "S4"], ["S1", "S2", "S3"]]
+kind = { type = "only_sub", v = 2 }
+
+[[task]]
+id = "all of a colour"
+category = "other"
+difficulty = [3, 4, 5]
+text_en = "I will win all cards of at least one colour."
+kind = { type = "all_of_a_colour" }
+
+[[task]]
+id = "pink=yellow"
+category = "other"
+difficulty = [4, 4, 4]
+text_en = "I will win as many pink as yellow cards (at least one each)."
+kind = { type = "same_of", a = "P", b = "Y" }
+
+[[task]]
+id = "more yellow than blue"
+category = "other"
+difficulty = [1, 1, 1]
+text_en = "I will win more yellow than blue cards (0 blue allowed)."
+kind = { type = "more_of", a = "Y", b = "B" }
+
+[[task]]
+id = "more pink than green"
+category = "other"
+difficulty = [1, 1, 1]
+text_en = "I will win more pink than green cards (0 green allowed)."
+kind = { type = "more_of", a = "P", b = "G" }
+
+[[task]]
+id = "most tricks"
+category = "other"
+difficulty = [2, 3, 3]
+text_en = "I will win more tricks than anyone else."
+kind = { type = "most_tricks" }
+
+[[task]]
+id = "more than all others"
+category = "other"
+difficulty = [3, 4, 5]
+text_en = "I will win more tricks than everyone else together."
+kind = { type = "more_than_all_others" }
+
+[[task]]
+id = "fewest tricks"
+category = "other"
+difficulty = [2, 2, 3]
+text_en = "I will win fewer tricks than anyone else."
+kind = { type = "fewest_tricks" }
+
+# ---------------------------------------------------------------- rule cards (logbook play rules, crew-wide)
+[[task]]
+id = "rule M12 no-lead pink sub"
+category = "rule"
+text_en = "No trick may be led with pink or a submarine."
+doubtful = true
+note = "Placeholder wording from a fan transcription of logbook mission 12."
+kind = { type = "crew_no_lead", cards = ["P", "S"] }
+
+[[task]]
+id = "rule M27 Y5 last"
+category = "rule"
+text_en = "Y5 must be the last card of the last trick."
+doubtful = true
+note = "Placeholder wording from a fan transcription of logbook mission 27."
+kind = { type = "last_card_of_game", card = "Y5" }
+
+[[task]]
+id = "rule M23 first winner leads"
+category = "rule"
+text_en = "Whoever wins trick 1 must always have more tricks than anyone else."
+doubtful = true
+note = "Placeholder wording from a fan transcription of logbook mission 23."
+kind = { type = "first_winner_always_leads" }
+
+[[task]]
+id = "rule M8 balanced 9s"
+category = "rule"
+text_en = "Nobody may ever have won two 9s more than anyone else."
+doubtful = true
+note = "Placeholder wording from a fan transcription of logbook mission 8."
+kind = { type = "balanced_value", value = 9 }
+
+[[task]]
+id = "rule M20 balanced 1s"
+category = "rule"
+text_en = "Nobody may ever have won two 1s more than anyone else."
+doubtful = true
+note = "Placeholder wording from a fan transcription of logbook missions 20/21."
+kind = { type = "balanced_value", value = 1 }

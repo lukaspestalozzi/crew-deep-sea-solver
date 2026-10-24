@@ -6,3 +6,5 @@ license.workspace = true
 description = "Rules engine and solver for The Crew: Mission Deep Sea"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
