@@ -7,8 +7,8 @@
 use crate::card::{Card, CardSet, Suit};
 use crate::game::Game;
 use crate::situation::{Owner, Situation};
-use crate::task::{merge, Boundaries, Kind, Status, NO_BOUNDARIES};
-use std::collections::HashSet;
+use crate::task::{counts_possible, merge, top_subs_count, Boundaries, CountRule, Kind, Status, NO_BOUNDARIES};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -54,12 +54,21 @@ pub struct Options<'a> {
     pub use_cache: bool,
     /// Treat interchangeable cards as one move.
     pub merge_cards: bool,
+    /// Check all trick-count rules jointly at each trick boundary.
+    pub count_check: bool,
     pub cancel: Option<&'a AtomicBool>,
 }
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { use_cache: true, merge_cards: true, cancel: None }
+        Options { use_cache: true, merge_cards: true, count_check: true, cancel: None }
+    }
+}
+
+impl Options<'_> {
+    /// No cache, no merging, no joint count check: the reference search.
+    pub fn plain() -> Self {
+        Options { use_cache: false, merge_cards: false, count_check: false, cancel: None }
     }
 }
 
@@ -108,6 +117,10 @@ pub fn solve_game(mut g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, St
         opts,
         boundaries,
         statuses: Vec::with_capacity(tasks.len()),
+        // Rule M23 only yields its rule after trick 1, so probe a finished game shape.
+        has_count_rules: opts.count_check
+            && tasks.iter().any(|&(k, o)| k.count_rule(&g, o).is_some() || matches!(k, Kind::FirstWinnerAlwaysLeads)),
+        count_memo: HashMap::new(),
         failed: HashSet::new(),
         stats: Stats::default(),
         line: Vec::new(),
@@ -167,12 +180,31 @@ struct Search<'a, 'o> {
     /// Where tasks tell cards of a suit apart.
     boundaries: Boundaries,
     statuses: Vec<Status>,
+    has_count_rules: bool,
+    count_memo: HashMap<u64, bool>,
     failed: HashSet<u128>,
     stats: Stats,
     line: Vec<Card>,
 }
 
 impl Search<'_, '_> {
+    /// Joint check of all trick-count rules, memoised by current counts,
+    /// guaranteed submarine wins and the trick-1 winner.
+    fn counts_possible(&mut self, g: &Game) -> bool {
+        let mut key: u64 = g.tricks.first().map_or(7, |t| t.winner as u64);
+        for p in 0..g.n {
+            key = key << 8 | (g.trick_counts[p] as u64) << 3 | top_subs_count(g, p);
+        }
+        key = key << 4 | g.tricks_left() as u64;
+        if let Some(&ok) = self.count_memo.get(&key) {
+            return ok;
+        }
+        let rules: Vec<CountRule> = self.tasks.iter().filter_map(|&(k, o)| k.count_rule(g, o)).collect();
+        let ok = counts_possible(g, &rules);
+        self.count_memo.insert(key, ok);
+        ok
+    }
+
     fn boundary_above(&self, suit: Suit, v: u8) -> bool {
         v < suit.max_value() && self.boundaries[suit as usize] & (1 << (v - 1)) != 0
     }
@@ -269,6 +301,9 @@ impl Search<'_, '_> {
                 Status::Failed => return Some(false),
                 Status::Done => return Some(true),
                 Status::Open => {}
+            }
+            if self.has_count_rules && !self.counts_possible(g) {
+                return Some(false);
             }
             if self.opts.use_cache {
                 let k = self.key(g);
@@ -390,10 +425,16 @@ tasks:
                 let moves: Vec<Card> = g.legal_moves().iter().collect();
                 g.play(moves[rng.below(moves.len())]);
             }
+            // Every third case draws only trick-count tasks, to exercise the joint count check.
+            let pool: Vec<&crate::catalogue::TaskCard> = if case % 3 == 0 {
+                cat.iter().filter(|t| t.kind.count_rule(&g, 0).is_some()).collect()
+            } else {
+                cat.iter().collect()
+            };
             let k = 1 + rng.below(3);
             let tasks: Resolved = (0..k)
                 .map(|_| {
-                    let t = &cat[rng.below(cat.len())];
+                    let t = pool[rng.below(pool.len())];
                     let mut o = rng.below(n);
                     if !t.captain_allowed() && o == g.captain as usize {
                         o = (o + 1) % n;
@@ -402,7 +443,7 @@ tasks:
                 })
                 .collect();
             let fast = solve_game(g.clone(), &tasks, &Options::default()).0;
-            let plain = solve_game(g.clone(), &tasks, &Options { use_cache: false, merge_cards: false, cancel: None }).0;
+            let plain = solve_game(g.clone(), &tasks, &Options::plain()).0;
             let ids: Vec<String> = tasks.iter().map(|(k, o)| format!("{k:?}@{o}")).collect();
             match (&fast, &plain) {
                 (Verdict::Feasible(line), Verdict::Feasible(_)) => {

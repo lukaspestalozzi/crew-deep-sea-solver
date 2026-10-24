@@ -659,6 +659,99 @@ fn trick_still_possible(p: &TrickProp, g: &Game) -> bool {
     }
 }
 
+/// A constraint on the final trick counts `f` (one per player).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountRule {
+    Exact(usize, u8),
+    AtLeast(usize, u8),
+    /// f[a] > f[b]
+    Greater(usize, usize),
+    /// f[a] == f[b]
+    Equal(usize, usize),
+    /// f[o] > f[q] for every other q
+    Most(usize),
+    /// f[o] < f[q] for every other q
+    Fewest(usize),
+    /// f[o] > sum of all others
+    MoreThanAll(usize),
+}
+
+impl CountRule {
+    pub fn holds(&self, f: &[u8]) -> bool {
+        let others = |o: usize| (0..f.len()).filter(move |&q| q != o);
+        match *self {
+            CountRule::Exact(o, k) => f[o] == k,
+            CountRule::AtLeast(o, k) => f[o] >= k,
+            CountRule::Greater(a, b) => f[a] > f[b],
+            CountRule::Equal(a, b) => f[a] == f[b],
+            CountRule::Most(o) => others(o).all(|q| f[o] > f[q]),
+            CountRule::Fewest(o) => others(o).all(|q| f[o] < f[q]),
+            CountRule::MoreThanAll(o) => f[o] as u32 > others(o).map(|q| f[q] as u32).sum::<u32>(),
+        }
+    }
+}
+
+impl Kind {
+    /// What this task implies about the final trick counts, if anything.
+    pub fn count_rule(&self, g: &Game, owner: usize) -> Option<CountRule> {
+        let cap = g.captain as usize;
+        match self {
+            Kind::ExactTricks(k) => Some(CountRule::Exact(owner, *k)),
+            Kind::VsCaptain(Cmp::More) => Some(CountRule::Greater(owner, cap)),
+            Kind::VsCaptain(Cmp::Fewer) => Some(CountRule::Greater(cap, owner)),
+            Kind::VsCaptain(Cmp::Same) => Some(CountRule::Equal(owner, cap)),
+            Kind::MostTricks => Some(CountRule::Most(owner)),
+            Kind::FewestTricks => Some(CountRule::Fewest(owner)),
+            Kind::MoreThanAllOthers => Some(CountRule::MoreThanAll(owner)),
+            Kind::WinTricks { first, last, only: true } => Some(CountRule::Exact(owner, first + *last as u8)),
+            Kind::WinTricks { first, last, only: false } => Some(CountRule::AtLeast(owner, first + *last as u8)),
+            Kind::InARow { n, exact: true } => Some(CountRule::Exact(owner, *n)),
+            Kind::InARow { n, exact: false } => Some(CountRule::AtLeast(owner, *n)),
+            Kind::FirstWinnerAlwaysLeads => g.tricks.first().map(|t| CountRule::Most(t.winner as usize)),
+            _ => None,
+        }
+    }
+}
+
+/// Is there a way to split the remaining tricks so that every rule holds?
+/// Each player also keeps at least the tricks their top submarines will win.
+pub fn counts_possible(g: &Game, rules: &[CountRule]) -> bool {
+    let n = g.n;
+    let r = g.tricks_left() as u8;
+    let mut lo = [0u8; crate::game::MAX_PLAYERS];
+    let mut need = 0u8;
+    for p in 0..n {
+        lo[p] = g.trick_counts[p] + top_subs(g, p).len() as u8;
+        need += lo[p] - g.trick_counts[p];
+    }
+    if need > r {
+        return false;
+    }
+    let mut f = lo;
+    fn rec(p: usize, n: usize, left: u8, f: &mut [u8; crate::game::MAX_PLAYERS], rules: &[CountRule]) -> bool {
+        if p == n - 1 {
+            f[p] += left;
+            let ok = rules.iter().all(|r| r.holds(&f[..n]));
+            f[p] -= left;
+            return ok;
+        }
+        for extra in 0..=left {
+            f[p] += extra;
+            let ok = rec(p + 1, n, left - extra, f, rules);
+            f[p] -= extra;
+            if ok {
+                return true;
+            }
+        }
+        false
+    }
+    rec(0, n, r - need, &mut f, rules)
+}
+
+pub fn top_subs_count(g: &Game, p: usize) -> u64 {
+    top_subs(g, p).len() as u64
+}
+
 /// Submarines from the top that player `p` holds without a gap among the
 /// remaining submarines. Each of them is certain to win its own trick
 /// (one card per player per trick), so `p` is certain to win that many more
