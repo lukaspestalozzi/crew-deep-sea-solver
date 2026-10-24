@@ -12,6 +12,8 @@ export interface TaskCard {
   note: string | null;
   rule: boolean;
   captain_allowed: boolean;
+  /** Specific cards the task names, for chips. */
+  cards: string[];
 }
 
 export interface Trick {

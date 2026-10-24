@@ -1,5 +1,6 @@
 <script lang="ts">
   import Header from '../components/Header.svelte';
+  import Card from '../components/Card.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { router, session } from '../lib/state.svelte';
   import { CATEGORIES, categoryName, difficultyOf, drawToTarget, taskText } from '../lib/tasks';
@@ -75,7 +76,8 @@
         <span class="diff" aria-label={i18n.t('difficulty')}>{t.rule ? '–' : t.difficulty![session.players - 3]}</span>
         <span class="grow" style="display: flex; flex-direction: column; gap: 2px">
           <span style="font-size: 15px; line-height: 1.3">{taskText(t)}</span>
-          <span class="small muted">
+          <span class="row small muted" style="gap: 4px; flex-wrap: wrap">
+            {#each t.cards as c}<Card card={c} />{/each}
             <code>{t.id}</code>
             {#if t.doubtful}<span title={t.note ?? ''} style="color: var(--accent)">· {i18n.t('doubtful')}</span>{/if}
           </span>

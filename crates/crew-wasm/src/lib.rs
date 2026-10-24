@@ -11,6 +11,7 @@ use crew_core::catalogue::catalogue;
 use crew_core::notation;
 use crew_core::situation::{Assignment, Owner, PlayedTrick, Situation};
 use crew_core::solver::{self, Options, Verdict};
+use crew_core::task::{Kind, TrickProp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
@@ -154,6 +155,16 @@ fn line_tricks(s: &Situation, line: &[Card]) -> Value {
     json!(out)
 }
 
+/// The specific cards a task names, for display as chips ("all 3s" = the four 3s).
+fn named_cards(kind: &Kind) -> Vec<Card> {
+    match kind {
+        Kind::WinCards(set) => set.iter().collect(),
+        Kind::Trick(TrickProp::CardWonBySub(c) | TrickProp::CardInLastTrick(c)) | Kind::LastCardOfGame(c) => vec![*c],
+        Kind::OnlySub(v) => card(&format!("S{v}")).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn progress_fn(f: &JsValue) -> Option<js_sys::Function> {
     f.dyn_ref::<js_sys::Function>().cloned()
 }
@@ -176,6 +187,7 @@ pub fn catalogue_json() -> String {
                 "note": t.note,
                 "rule": t.is_rule(),
                 "captain_allowed": t.captain_allowed(),
+                "cards": named_cards(&t.kind).iter().map(|c| c.to_string()).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -422,6 +434,16 @@ pub fn random_situation(players: u32, target: u32, seed: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalogue_names_cards_for_chips() {
+        let list: Value = serde_json::from_str(&catalogue_json()).unwrap();
+        let cards = |id: &str| list["ok"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["cards"].clone();
+        assert_eq!(cards("win all 3s"), json!(["P3", "B3", "G3", "Y3"]));
+        assert_eq!(cards("win P7 with sub"), json!(["P7"]));
+        assert_eq!(cards("only S2"), json!(["S2"]));
+        assert_eq!(cards("no pink"), json!([]));
+    }
 
     const TEXT: &str = "crew 1
 players: 4
