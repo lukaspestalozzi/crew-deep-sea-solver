@@ -4,10 +4,10 @@
 //! succeeds as soon as every task is done. Positions between tricks that were
 //! proven lost are cached by (remaining hands, leader, task signatures).
 
-use crate::card::Card;
-use crate::game::{Game, MAX_PLAYERS};
+use crate::card::{Card, CardSet, Suit};
+use crate::game::Game;
 use crate::situation::{Owner, Situation};
-use crate::task::{Kind, Status};
+use crate::task::{merge, Boundaries, Kind, Status, NO_BOUNDARIES};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,13 +50,16 @@ pub struct Stats {
 
 #[derive(Debug, Clone)]
 pub struct Options<'a> {
+    /// Cache positions proven lost.
     pub use_cache: bool,
+    /// Treat interchangeable cards as one move.
+    pub merge_cards: bool,
     pub cancel: Option<&'a AtomicBool>,
 }
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { use_cache: true, cancel: None }
+        Options { use_cache: true, merge_cards: true, cancel: None }
     }
 }
 
@@ -95,7 +98,20 @@ pub fn solve(s: &Situation, opts: &Options) -> Result<(Verdict, Stats), SolveErr
 }
 
 pub fn solve_game(mut g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, Stats) {
-    let mut search = Search { tasks, opts, failed: HashSet::new(), stats: Stats::default(), line: Vec::new() };
+    let boundaries = if opts.merge_cards {
+        tasks.iter().fold(NO_BOUNDARIES, |acc, (k, _)| merge(acc, k.boundaries()))
+    } else {
+        [0x1FF; 5]
+    };
+    let mut search = Search {
+        tasks,
+        opts,
+        boundaries,
+        statuses: Vec::with_capacity(tasks.len()),
+        failed: HashSet::new(),
+        stats: Stats::default(),
+        line: Vec::new(),
+    };
     let verdict = match search.dfs(&mut g) {
         None => Verdict::Cancelled,
         Some(true) => Verdict::Feasible(search.line),
@@ -107,9 +123,17 @@ pub fn solve_game(mut g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, St
 
 /// Combined status of all tasks (between tricks).
 pub fn status(g: &Game, tasks: &Resolved) -> Status {
+    status_into(g, tasks, &mut Vec::new())
+}
+
+/// As [`status`], also recording each task's status (stops at the first failure).
+fn status_into(g: &Game, tasks: &Resolved, out: &mut Vec<Status>) -> Status {
+    out.clear();
     let mut all_done = true;
     for &(k, o) in tasks {
-        match k.eval(g, o) {
+        let st = k.eval(g, o);
+        out.push(st);
+        match st {
             Status::Failed => return Status::Failed,
             Status::Open => all_done = false,
             Status::Done => {}
@@ -126,28 +150,104 @@ pub fn status(g: &Game, tasks: &Resolved) -> Status {
     }
 }
 
-#[derive(Hash, PartialEq, Eq)]
-struct Key {
-    hands: [u64; MAX_PLAYERS],
-    leader: u8,
-    sigs: Vec<u64>,
+/// Two independent 64-bit multiply-rotate hashes; a collision of both is
+/// negligible (about 2^-128 per pair).
+fn key_hash(words: impl Iterator<Item = u64>) -> u128 {
+    let (mut a, mut b) = (0x243F_6A88_85A3_08D3u64, 0x1319_8A2E_0370_7344u64);
+    for w in words {
+        a = (a.rotate_left(5) ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        b = (b.rotate_left(7) ^ w).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    }
+    (a as u128) << 64 | b as u128
 }
 
 struct Search<'a, 'o> {
     tasks: &'a Resolved,
     opts: &'a Options<'o>,
-    failed: HashSet<Key>,
+    /// Where tasks tell cards of a suit apart.
+    boundaries: Boundaries,
+    statuses: Vec<Status>,
+    failed: HashSet<u128>,
     stats: Stats,
     line: Vec<Card>,
 }
 
 impl Search<'_, '_> {
-    fn key(&self, g: &Game) -> Key {
-        let mut hands = [0u64; MAX_PLAYERS];
-        for (i, h) in g.hands[..g.n].iter().enumerate() {
-            hands[i] = h.0;
+    fn boundary_above(&self, suit: Suit, v: u8) -> bool {
+        v < suit.max_value() && self.boundaries[suit as usize] & (1 << (v - 1)) != 0
+    }
+
+    /// Position key between tricks. Cards are encoded by relative rank: per
+    /// suit, the owners of the remaining cards from high to low, each with
+    /// its class (how many task boundaries lie above it). Positions that
+    /// differ only in which interchangeable cards are gone play out
+    /// identically, so they share a key. Needs `self.statuses` to be current.
+    fn key(&self, g: &Game) -> u128 {
+        let mut words = [0u64; 32];
+        let mut len = 0;
+        let mut push = |w: u64| {
+            words[len] = w;
+            len += 1;
+        };
+        let mut owner = [0u8; 40];
+        for p in 0..g.n {
+            for c in g.hands[p].iter() {
+                owner[c.index() as usize] = p as u8 + 1;
+            }
         }
-        Key { hands, leader: g.leader, sigs: self.tasks.iter().map(|&(k, o)| k.signature(g, o)).collect() }
+        for suit in Suit::ALL {
+            // At most 9 cards x 7 bits (3 owner + 4 class) after a leading 1.
+            let mut w: u64 = 1;
+            let mut class = 0u64;
+            for v in (1..=suit.max_value()).rev() {
+                if self.boundary_above(suit, v) {
+                    class += 1;
+                }
+                let o = owner[Card::new(suit, v).index() as usize] as u64;
+                if o != 0 {
+                    w = w << 7 | o << 4 | class;
+                }
+            }
+            push(w);
+        }
+        push(g.leader as u64);
+        for (i, &(k, o)) in self.tasks.iter().enumerate() {
+            push(k.signature(g, o, self.statuses[i]));
+        }
+        key_hash(words[..len].iter().copied())
+    }
+
+    /// Legal moves with interchangeable cards collapsed to one representative.
+    /// Two cards of one suit in the same hand are interchangeable when no task
+    /// boundary lies between them and no card between them is held by another
+    /// player or lies in the current trick (cards already played are transparent).
+    fn moves(&self, g: &Game) -> CardSet {
+        let legal = g.legal_moves();
+        let hand = g.hands[g.to_play()];
+        let in_trick: CardSet = g.current.iter().copied().collect();
+        let separators = g.unplayed().minus(hand).union(in_trick);
+        let mut out = CardSet::EMPTY;
+        for suit in Suit::ALL {
+            if legal.intersect(suit.cards()).is_empty() {
+                continue;
+            }
+            let mut in_run = false;
+            for v in (1..=suit.max_value()).rev() {
+                if self.boundary_above(suit, v) {
+                    in_run = false;
+                }
+                let c = Card::new(suit, v);
+                if legal.contains(c) {
+                    if !in_run {
+                        out.insert(c);
+                        in_run = true;
+                    }
+                } else if separators.contains(c) {
+                    in_run = false;
+                }
+            }
+        }
+        out
     }
 
     /// Some(true) = winning line found (in `self.line`), Some(false) = lost, None = cancelled.
@@ -162,7 +262,10 @@ impl Search<'_, '_> {
         }
         let mut key = None;
         if g.current.is_empty() {
-            match status(g, self.tasks) {
+            let mut statuses = std::mem::take(&mut self.statuses);
+            let st = status_into(g, self.tasks, &mut statuses);
+            self.statuses = statuses;
+            match st {
                 Status::Failed => return Some(false),
                 Status::Done => return Some(true),
                 Status::Open => {}
@@ -176,7 +279,7 @@ impl Search<'_, '_> {
                 key = Some(k);
             }
         }
-        for card in g.legal_moves().iter() {
+        for card in self.moves(g).iter() {
             g.play(card);
             self.line.push(card);
             let r = self.dfs(g);
@@ -246,7 +349,7 @@ tasks:
 
     #[test]
     fn several_tasks_and_a_rule_card() {
-        let s = situation("Player2: win B4\nPlayer1: first-trick\nPlayer4: win P9 Y8\ncrew: rule M12 no-lead pink sub");
+        let s = situation("Player2: win B4\nPlayer1: first-trick\nPlayer4: win P9 Y8\ncrew: rule M23 first winner leads");
         let (v, stats) = solve(&s, &Options::default()).unwrap();
         match v {
             Verdict::Feasible(line) => check_line(&s, &line),
@@ -255,11 +358,68 @@ tasks:
     }
 
     #[test]
+    fn rule_card_blocking_pink_leads_makes_p9_unwinnable() {
+        // Nobody may lead pink, so P9 is only ever discarded and never wins.
+        let s = situation("Player4: win P9 Y8\ncrew: rule M12 no-lead pink sub");
+        let (v, stats) = solve(&s, &Options::default()).unwrap();
+        assert_eq!(v, Verdict::Infeasible, "{stats:?}");
+    }
+
+    #[test]
     fn captain_and_unknown_owner_are_rejected() {
         let s = situation("Player1: more than captain");
         assert!(matches!(solve(&s, &Options::default()), Err(SolveError::CaptainNotAllowed(_))));
         let s = situation("?: win B4");
         assert!(matches!(solve(&s, &Options::default()), Err(SolveError::UnknownOwner(_))));
+    }
+
+    /// The optimised search (cache + merged cards) must agree with a plain
+    /// search on random late-game positions with random tasks.
+    #[test]
+    fn optimised_search_agrees_with_plain_search() {
+        use crate::catalogue::catalogue;
+        use crate::rng::Rng;
+        let mut rng = Rng::new(42);
+        let cat = catalogue();
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..400 {
+            let n = 3 + case % 3;
+            let mut g = Game::new(&Game::random_hands(n, &mut rng)).unwrap();
+            let left = if n == 5 { 3 } else { 4 };
+            while g.tricks_left() > left || !g.current.is_empty() {
+                let moves: Vec<Card> = g.legal_moves().iter().collect();
+                g.play(moves[rng.below(moves.len())]);
+            }
+            let k = 1 + rng.below(3);
+            let tasks: Resolved = (0..k)
+                .map(|_| {
+                    let t = &cat[rng.below(cat.len())];
+                    let mut o = rng.below(n);
+                    if !t.captain_allowed() && o == g.captain as usize {
+                        o = (o + 1) % n;
+                    }
+                    (&t.kind, o)
+                })
+                .collect();
+            let fast = solve_game(g.clone(), &tasks, &Options::default()).0;
+            let plain = solve_game(g.clone(), &tasks, &Options { use_cache: false, merge_cards: false, cancel: None }).0;
+            let ids: Vec<String> = tasks.iter().map(|(k, o)| format!("{k:?}@{o}")).collect();
+            match (&fast, &plain) {
+                (Verdict::Feasible(line), Verdict::Feasible(_)) => {
+                    feasible += 1;
+                    let mut h = g.clone();
+                    for &c in line {
+                        assert!(h.legal_moves().contains(c));
+                        h.play(c);
+                    }
+                    assert_eq!(status(&h, &tasks), Status::Done, "case {case}: {ids:?}");
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => infeasible += 1,
+                _ => panic!("case {case} ({n} players): fast {fast:?} vs plain {plain:?}; tasks {ids:?}"),
+            }
+        }
+        // Make sure both outcomes were exercised.
+        assert!(feasible > 50 && infeasible > 50, "feasible {feasible}, infeasible {infeasible}");
     }
 
     #[test]

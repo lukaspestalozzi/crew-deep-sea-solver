@@ -1,0 +1,33 @@
+crew 1
+title: S3 impossible for Player2
+players: 4
+Player1: P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4
+Player2: P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1
+Player3: P3 P6 B3 B8 G2 G5 G8 Y1 Y8 S3
+Player4: rest
+tasks:
+Player2: win S3
+---
+crew 1
+title: M12 blocks P9
+players: 4
+Player1: P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4
+Player2: P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1
+Player3: P3 P6 B3 B8 G2 G5 G8 Y1 Y8 S3
+Player4: rest
+tasks:
+Player4: win P9 Y8
+crew: rule M12 no-lead pink sub
+---
+crew 1
+title: Mockup mission
+players: 4
+Player1: P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4
+Player2: P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1
+Player3: P3 P6 B3 B8 G2 G5 G8 Y1 Y8 S3
+Player4: rest
+tasks:
+Player2: win B4
+Player4: win P9 Y8
+Player1: first-trick
+Player3: tricks =2

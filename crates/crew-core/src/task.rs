@@ -123,14 +123,17 @@ impl Kind {
             Kind::WinCards(s) => {
                 if won.intersect(*s) == *s {
                     Done
-                } else if over || others().any(|q| !g.won[q].intersect(*s).is_empty()) {
+                } else if over
+                    || others().any(|q| !g.won[q].intersect(*s).is_empty())
+                    || s.minus(won).iter().any(|c| !can_capture(g, owner, c))
+                {
                     Failed
                 } else {
                     Open
                 }
             }
             Kind::WinNone(s) => {
-                if !won.intersect(*s).is_empty() {
+                if !won.intersect(*s).is_empty() || !top_subs(g, owner).intersect(*s).is_empty() {
                     Failed
                 } else if over || unplayed.intersect(*s).is_empty() {
                     Done
@@ -200,6 +203,8 @@ impl Kind {
                 }
                 match p {
                     TrickProp::CardWonBySub(c) | TrickProp::CardInLastTrick(c) if !unplayed.contains(*c) => Failed,
+                    TrickProp::CardWonBySub(_) if g.hands[owner].intersect(Suit::Sub.cards()).is_empty() => Failed,
+                    _ if !trick_still_possible(p, g) => Failed,
                     _ => Open,
                 }
             }
@@ -231,7 +236,7 @@ impl Kind {
             }
             Kind::ExactTricks(k) => {
                 let k = *k as i32;
-                if my > k || my + r < k {
+                if my + top_subs(g, owner).len() as i32 > k || my + r < k {
                     Failed
                 } else if over {
                     Done
@@ -244,9 +249,15 @@ impl Kind {
                 let mut all_done = true;
                 for &(s, k) in counts {
                     let have = won.intersect(s.cards()).len();
-                    let avail = unplayed.intersect(s.cards()).len();
+                    let mut avail = unplayed.intersect(s.cards()).len();
+                    let mut forced = 0;
+                    if s == Suit::Sub {
+                        // Only capturable submarines count; the top ones are certain.
+                        avail = unplayed.intersect(s.cards()).iter().filter(|&c| can_capture(g, owner, c)).count() as u32;
+                        forced = top_subs(g, owner).len();
+                    }
                     let k = k as u32;
-                    if have + if over { 0 } else { avail } < k || (*exact && have > k) {
+                    if have + if over { 0 } else { avail } < k || (*exact && have + forced > k) {
                         return Failed;
                     }
                     let done = if *exact { have == k && (over || avail == 0) } else { have >= k };
@@ -319,8 +330,10 @@ impl Kind {
                 let target = Card::new(Suit::Sub, *v);
                 let my_subs = won.intersect(Suit::Sub.cards());
                 if !my_subs.minus(CardSet::single(target)).is_empty()
+                    || !top_subs(g, owner).minus(CardSet::single(target)).is_empty()
                     || others().any(|q| g.won[q].contains(target))
                     || (over && !my_subs.contains(target))
+                    || (!my_subs.contains(target) && !can_capture(g, owner, target))
                 {
                     Failed
                 } else if my_subs.contains(target) && (over || unplayed.intersect(Suit::Sub.cards()).is_empty()) {
@@ -422,12 +435,17 @@ impl Kind {
             }
             Kind::FirstWinnerAlwaysLeads => match g.tricks.first() {
                 None => Open,
-                Some(t) => {
-                    let w = t.winner as usize;
-                    let cw = g.trick_counts[w];
-                    if (0..g.n).any(|q| q != w && g.trick_counts[q] >= cw) {
-                        Failed
-                    } else if over {
+                Some(first) => {
+                    // "At all times": check after every trick so far.
+                    let w = first.winner as usize;
+                    let mut counts = [0u8; crate::game::MAX_PLAYERS];
+                    for t in &g.tricks {
+                        counts[t.winner as usize] += 1;
+                        if (0..g.n).any(|q| q != w && counts[q] >= counts[w]) {
+                            return Failed;
+                        }
+                    }
+                    if over {
                         Done
                     } else {
                         Open
@@ -435,12 +453,17 @@ impl Kind {
                 }
             },
             Kind::BalancedValue(v) => {
+                // "At no time": check after every trick so far.
                 let set = CardSet::colour_value(*v);
-                let counts: Vec<u32> = (0..g.n).map(|q| g.won[q].intersect(set).len()).collect();
-                let (mx, mn) = (*counts.iter().max().unwrap(), *counts.iter().min().unwrap());
-                if mx >= mn + 2 {
-                    Failed
-                } else if over || unplayed.intersect(set).is_empty() {
+                let mut counts = [0u32; crate::game::MAX_PLAYERS];
+                for t in &g.tricks {
+                    counts[t.winner as usize] += t.set().intersect(set).len();
+                    let (mx, mn) = (counts[..g.n].iter().max().unwrap(), counts[..g.n].iter().min().unwrap());
+                    if *mx >= mn + 2 {
+                        return Failed;
+                    }
+                }
+                if over || unplayed.intersect(set).is_empty() {
                     Done
                 } else {
                     Open
@@ -450,18 +473,111 @@ impl Kind {
     }
 }
 
+/// Cards of `s` in suits that `s` only partly covers: those are the cards that
+/// `s` tells apart from other cards of the same suit.
+fn partial(s: CardSet) -> CardSet {
+    Suit::ALL.iter().fold(CardSet::EMPTY, |acc, su| {
+        let part = s.intersect(su.cards());
+        if part.is_empty() || part == su.cards() {
+            acc
+        } else {
+            acc.union(part)
+        }
+    })
+}
+
+/// Value boundaries per suit (indexed by `Suit as usize`): bit `v - 1` set
+/// means cards of value `v` and `v + 1` of that suit are told apart by some
+/// task. Cards of a suit with no boundary between them are interchangeable.
+pub type Boundaries = [u16; 5];
+
+pub const NO_BOUNDARIES: Boundaries = [0; 5];
+
+/// Boundaries on both sides of every card in `s`.
+pub fn around(s: CardSet) -> Boundaries {
+    let mut b = NO_BOUNDARIES;
+    for c in s.iter() {
+        let (i, v) = (c.suit() as usize, c.value() as u16);
+        if v < c.suit().max_value() as u16 {
+            b[i] |= 1 << (v - 1);
+        }
+        if v > 1 {
+            b[i] |= 1 << (v - 2);
+        }
+    }
+    b
+}
+
+/// A boundary between `v` and `v + 1` in every colour suit.
+fn colour_cut(v: u8) -> Boundaries {
+    let mut b = NO_BOUNDARIES;
+    if (1..9).contains(&v) {
+        for s in Suit::COLOURS {
+            b[s as usize] = 1 << (v - 1);
+        }
+    }
+    b
+}
+
+pub fn merge(a: Boundaries, b: Boundaries) -> Boundaries {
+    let mut out = a;
+    for i in 0..5 {
+        out[i] |= b[i];
+    }
+    out
+}
+
 impl Kind {
+    /// Where this task tells cards of the same suit apart (see [`Boundaries`]).
+    pub fn boundaries(&self) -> Boundaries {
+        let all_colour_values = [0xFF, 0xFF, 0xFF, 0xFF, 0];
+        match self {
+            Kind::WinCards(s) | Kind::WinNone(s) | Kind::NoLead(s) | Kind::CrewNoLead(s) => around(partial(*s)),
+            Kind::WinWith { value, containing } => {
+                around(CardSet::colour_value(*value).union(containing.map_or(CardSet::EMPTY, CardSet::colour_value)))
+            }
+            Kind::Trick(p) => match p {
+                TrickProp::SameCount(..) => NO_BOUNDARIES,
+                TrickProp::CardWonBySub(c) | TrickProp::CardInLastTrick(c) => around(CardSet::single(*c)),
+                TrickProp::AllBelow(b) => colour_cut(b.saturating_sub(1)),
+                TrickProp::AllAbove(b) => colour_cut(*b),
+                TrickProp::AllEven | TrickProp::AllOdd | TrickProp::SumAbove(_) | TrickProp::SumBelow(_) | TrickProp::SumIn(_) => {
+                    all_colour_values
+                }
+            },
+            Kind::ValueCount { value, .. } | Kind::BalancedValue(value) => around(CardSet::colour_value(*value)),
+            Kind::OnlySub(v) => around(CardSet::single(Card::new(Suit::Sub, *v))),
+            Kind::LastCardOfGame(c) => around(CardSet::single(*c)),
+            Kind::VsCaptain(_)
+            | Kind::NoneOfFirst(_)
+            | Kind::WinTricks { .. }
+            | Kind::ExactTricks(_)
+            | Kind::Predict
+            | Kind::SuitCounts { .. }
+            | Kind::InARow { .. }
+            | Kind::NoTwoInARow
+            | Kind::AllOfAColour
+            | Kind::MoreOf(..)
+            | Kind::SameOf(..)
+            | Kind::MostTricks
+            | Kind::MoreThanAllOthers
+            | Kind::FewestTricks
+            | Kind::FirstWinnerAlwaysLeads => NO_BOUNDARIES,
+        }
+    }
+
     /// Everything about the game's history that this task's future evaluation
     /// depends on, beyond the remaining hands, the leader and the trick number.
     /// Two positions with equal hands, leader and signatures of all tasks have
     /// the same outcome; the solver caches failed positions by this key.
-    /// Only valid between tricks and for tasks that have not failed.
-    pub fn signature(&self, g: &Game, owner: usize) -> u64 {
+    /// Only valid between tricks and for tasks that have not failed;
+    /// `status` is this task's current evaluation.
+    pub fn signature(&self, g: &Game, owner: usize, status: Status) -> u64 {
         let won = g.won[owner];
         let my = g.trick_counts[owner] as u64;
         let counts = || (0..g.n).fold(0u64, |acc, q| acc | (g.trick_counts[q] as u64) << (4 * q));
         let won_last = g.tricks.last().is_some_and(|t| t.winner as usize == owner);
-        let status = self.eval(g, owner) as u64;
+        let status = status as u64;
         let info = match self {
             Kind::WinCards(s) | Kind::WinNone(s) => won.intersect(*s).0,
             Kind::OnlySub(_) => won.intersect(Suit::Sub.cards()).0,
@@ -505,6 +621,73 @@ impl Kind {
         debug_assert!(info < 1 << 60);
         status << 60 | info
     }
+}
+
+/// Necessary condition for a future trick with property `p`: every player
+/// contributes one card, so each hand must still hold a fitting card.
+/// (Between tricks only; in a 3-player game the leftover card is included,
+/// which keeps the check necessary.)
+fn trick_still_possible(p: &TrickProp, g: &Game) -> bool {
+    let colour_values = |p: usize| g.hands[p].minus(Suit::Sub.cards()).iter().map(|c| c.value() as u32);
+    let players = 0..g.n;
+    let ni = g.n - 3;
+    match p {
+        TrickProp::AllBelow(b) => players.clone().all(|q| colour_values(q).any(|v| v < *b as u32)),
+        TrickProp::AllAbove(b) => players.clone().all(|q| colour_values(q).any(|v| v > *b as u32)),
+        TrickProp::AllEven => players.clone().all(|q| colour_values(q).any(|v| v % 2 == 0)),
+        TrickProp::AllOdd => players.clone().all(|q| colour_values(q).any(|v| v % 2 == 1)),
+        TrickProp::SumAbove(_) | TrickProp::SumBelow(_) | TrickProp::SumIn(_) => {
+            let mut lo = 0;
+            let mut hi = 0;
+            for q in players.clone() {
+                match (colour_values(q).min(), colour_values(q).max()) {
+                    (Some(a), Some(b)) => {
+                        lo += a;
+                        hi += b;
+                    }
+                    _ => return false,
+                }
+            }
+            match p {
+                TrickProp::SumAbove(b) => hi > b[ni] as u32,
+                TrickProp::SumBelow(b) => lo < b[ni] as u32,
+                TrickProp::SumIn(vals) => vals.iter().any(|&v| lo <= v as u32 && v as u32 <= hi),
+                _ => unreachable!(),
+            }
+        }
+        _ => true,
+    }
+}
+
+/// Submarines from the top that player `p` holds without a gap among the
+/// remaining submarines. Each of them is certain to win its own trick
+/// (one card per player per trick), so `p` is certain to win that many more
+/// tricks, and certain to capture these submarines.
+fn top_subs(g: &Game, p: usize) -> CardSet {
+    let mut out = CardSet::EMPTY;
+    let remaining = g.unplayed().intersect(Suit::Sub.cards());
+    for v in (1..=4).rev() {
+        let c = Card::new(Suit::Sub, v);
+        if !remaining.contains(c) {
+            continue;
+        }
+        if g.hands[p].contains(c) {
+            out.insert(c);
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Necessary condition for `owner` to still win the trick holding unplayed card `c`.
+/// For a submarine held by someone else, the owner needs a higher submarine.
+fn can_capture(g: &Game, owner: usize, c: Card) -> bool {
+    if !c.is_sub() || g.hands[owner].contains(c) {
+        return true;
+    }
+    let higher = Suit::Sub.cards().iter().filter(|s| s.value() > c.value()).collect::<CardSet>();
+    !g.hands[owner].intersect(higher).is_empty()
 }
 
 fn won_tricks<'a>(g: &'a Game, owner: usize) -> impl Iterator<Item = &'a Trick> + 'a {
@@ -606,6 +789,66 @@ mod tests {
         play_all(&mut g, "P2 P5 P6 P9"); // Player4
         assert_eq!(only_first.eval(&g, 0), Status::Open);
         assert_eq!(Kind::InARow { n: 2, exact: false }.eval(&g, 0), Status::Open);
+    }
+
+    /// Every early verdict (done or failed before the game ends) must match
+    /// the end-of-game evaluation on every continuation. Exhaustive for short
+    /// endings, sampled for longer ones.
+    #[test]
+    fn early_verdicts_are_sound() {
+        use crate::catalogue::catalogue;
+        use crate::rng::Rng;
+
+        fn all_endings(g: &mut Game, f: &mut dyn FnMut(&Game)) {
+            if g.is_over() {
+                f(g);
+                return;
+            }
+            for c in g.legal_moves().iter() {
+                g.play(c);
+                all_endings(g, f);
+                g.undo();
+            }
+        }
+
+        let mut rng = Rng::new(9);
+        let cat = catalogue();
+        let mut checked = 0;
+        for case in 0..600 {
+            let n = 3 + case % 3;
+            let exhaustive = case % 2 == 0;
+            let left = if exhaustive { if n == 3 { 4 } else { 3 } } else { 7 };
+            let mut g = Game::new(&Game::random_hands(n, &mut rng)).unwrap();
+            while g.tricks_left() > left || !g.current.is_empty() {
+                let m: Vec<Card> = g.legal_moves().iter().collect();
+                g.play(m[rng.below(m.len())]);
+            }
+            for t in cat {
+                let owner = rng.below(n);
+                let claim = t.kind.eval(&g, owner);
+                if claim == Status::Open {
+                    continue;
+                }
+                checked += 1;
+                let mut check = |end: &Game| {
+                    let fin = t.kind.eval(end, owner);
+                    assert_eq!(fin, claim, "case {case}: {} for Player{} claimed {claim:?} early, ended {fin:?}", t.id, owner + 1);
+                };
+                if exhaustive {
+                    all_endings(&mut g.clone(), &mut check);
+                } else {
+                    for _ in 0..200 {
+                        let mut h = g.clone();
+                        while !h.is_over() {
+                            let m: Vec<Card> = h.legal_moves().iter().collect();
+                            h.play(m[rng.below(m.len())]);
+                        }
+                        check(&h);
+                    }
+                }
+            }
+        }
+        assert!(checked > 5000, "only {checked} early verdicts checked");
     }
 
     #[test]
