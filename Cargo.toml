@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/crew-core", "crates/crew-cli"]
+members = ["crates/crew-core", "crates/crew-cli", "crates/crew-wasm"]
 
 [workspace.package]
 edition = "2021"
@@ -9,3 +9,11 @@ license = "MIT"
 
 [profile.release]
 debug = 1
+
+# WebAssembly build for the web app: small and fast.
+[profile.web]
+inherits = "release"
+debug = false
+strip = true
+lto = true
+codegen-units = 1

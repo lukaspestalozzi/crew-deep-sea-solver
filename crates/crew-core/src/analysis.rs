@@ -30,7 +30,7 @@ pub struct DraftReport {
     pub impossible_pairs: Vec<(usize, usize)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DraftOptions<'a> {
     /// Solve every draft if there are at most this many, else sample this many.
     pub limit: u64,
@@ -38,11 +38,13 @@ pub struct DraftOptions<'a> {
     /// Owners to compare against for the smallest fix (e.g. the draft entered).
     pub reference: Option<Vec<Owner>>,
     pub cancel: Option<&'a AtomicBool>,
+    /// Called after each draft with (drafts checked, drafts planned).
+    pub progress: Option<&'a dyn Fn(u64, u64)>,
 }
 
 impl Default for DraftOptions<'_> {
     fn default() -> Self {
-        DraftOptions { limit: 2000, seed: 1, reference: None, cancel: None }
+        DraftOptions { limit: 2000, seed: 1, reference: None, cancel: None, progress: None }
     }
 }
 
@@ -91,12 +93,16 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
     };
 
     // Solve one draft; returns None if cancelled.
+    let planned = total.min(opts.limit);
     let solve_draft = |owners: &[Owner], report: &mut DraftReport| -> Option<bool> {
         let mut d = s.clone();
         for (a, o) in d.tasks.iter_mut().zip(owners) {
             a.owner = *o;
         }
         report.checked += 1;
+        if let Some(p) = opts.progress {
+            p(report.checked, planned);
+        }
         match solver::solve(&d, &solve_opts) {
             Ok((Verdict::Feasible(line), _)) => {
                 report.working += 1;

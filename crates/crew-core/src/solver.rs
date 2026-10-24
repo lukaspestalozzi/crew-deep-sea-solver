@@ -48,7 +48,7 @@ pub struct Stats {
     pub cache_size: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Options<'a> {
     /// Cache positions proven lost.
     pub use_cache: bool,
@@ -57,18 +57,20 @@ pub struct Options<'a> {
     /// Check all trick-count rules jointly at each trick boundary.
     pub count_check: bool,
     pub cancel: Option<&'a AtomicBool>,
+    /// Called with the node count about every million nodes.
+    pub progress: Option<&'a dyn Fn(u64)>,
 }
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { use_cache: true, merge_cards: true, count_check: true, cancel: None }
+        Options { use_cache: true, merge_cards: true, count_check: true, cancel: None, progress: None }
     }
 }
 
 impl Options<'_> {
     /// No cache, no merging, no joint count check: the reference search.
     pub fn plain() -> Self {
-        Options { use_cache: false, merge_cards: false, count_check: false, cancel: None }
+        Options { use_cache: false, merge_cards: false, count_check: false, cancel: None, progress: None }
     }
 }
 
@@ -289,6 +291,11 @@ impl Search<'_, '_> {
             if let Some(c) = self.opts.cancel {
                 if c.load(Ordering::Relaxed) {
                     return None;
+                }
+            }
+            if self.stats.nodes & 0xF_FFFF == 0 {
+                if let Some(p) = self.opts.progress {
+                    p(self.stats.nodes);
                 }
             }
         }
