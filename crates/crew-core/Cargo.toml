@@ -1,0 +1,8 @@
+[package]
+name = "crew-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Rules engine and solver for The Crew: Mission Deep Sea"
+
+[dependencies]

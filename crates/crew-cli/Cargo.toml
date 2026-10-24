@@ -1,0 +1,13 @@
+[package]
+name = "crew-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Command line for the Deep Sea solver"
+
+[[bin]]
+name = "crew"
+path = "src/main.rs"
+
+[dependencies]
+crew-core = { path = "../crew-core" }
