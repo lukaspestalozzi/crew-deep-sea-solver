@@ -1,0 +1,12 @@
+crew 1
+title: Spec example (two owners unknown)
+players: 4
+Player1: P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4
+Player2: P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1
+Player3: P3 P6 B3 B8 G2 G5 G8 Y1 Y8 S3
+Player4: rest
+tasks:
+Player2: win B4
+?:       win P9 Y8
+Player1: first-trick
+?:       tricks =2

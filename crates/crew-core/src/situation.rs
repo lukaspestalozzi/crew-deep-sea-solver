@@ -5,7 +5,7 @@ use crate::catalogue::TaskCard;
 use crate::game::Game;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Owner {
     /// Player index (0-based; `Player1` is 0).
     Player(u8),

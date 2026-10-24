@@ -4,9 +4,10 @@
 //! crew solve FILE [--no-cache]   solve every situation in a .crew file
 //! ```
 
+use crew_core::analysis::{self, DraftOptions};
 use crew_core::card::Card;
 use crew_core::notation;
-use crew_core::situation::Situation;
+use crew_core::situation::{Owner, Situation};
 use crew_core::solver::{self, Options, Verdict};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -28,7 +29,10 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--no-cache]   solve every situation in a .crew file
+  crew solve FILE [--all-drafts] [--limit N] [--no-cache]
+                                 solve every situation in a .crew file; tasks with
+                                 owner ? are searched over all legal drafts (sampled
+                                 above N drafts); --all-drafts also checks other drafts
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
                                  random deals, tasks drawn to the target sum, random legal draft";
 
@@ -136,9 +140,69 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn owner_name(o: &Owner) -> String {
+    match o {
+        Owner::Player(p) => format!("Player{}", p + 1),
+        Owner::Unknown => "?".into(),
+        Owner::Crew => "crew".into(),
+    }
+}
+
+fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
+    let start = Instant::now();
+    let opts = DraftOptions { reference, limit, ..DraftOptions::default() };
+    match analysis::draft_search(s, &opts) {
+        Err(e) => println!("error: {e}"),
+        Ok(r) => {
+            let secs = start.elapsed().as_secs_f64();
+            match r.any_works {
+                Some(true) => println!("FEASIBLE with some draft"),
+                Some(false) => println!("NOT FEASIBLE with any draft"),
+                None => println!("CANCELLED"),
+            }
+            let pct = if r.checked > 0 { 100.0 * r.working as f64 / r.checked as f64 } else { 0.0 };
+            if r.sampled {
+                println!("about {pct:.0}% of {} legal drafts work ({} sampled)", r.total, r.checked);
+            } else {
+                println!("{} of {} legal drafts work", r.working, r.total);
+            }
+            for &(i, p) in &r.impossible_pairs {
+                println!("  impossible on its own: Player{} · {}", p + 1, s.tasks[i].card.id);
+            }
+            let shown = match (&r.closest, &r.example) {
+                (Some((owners, dist, line)), _) => {
+                    println!("smallest fix ({dist} task(s) change owner):");
+                    Some((owners, line))
+                }
+                (None, Some((owners, line))) => {
+                    println!("a working draft:");
+                    Some((owners, line))
+                }
+                _ => None,
+            };
+            if let Some((owners, _)) = shown {
+                for (a, o) in s.tasks.iter().zip(owners) {
+                    println!("  {:<8} {}", format!("{}:", owner_name(o)), a.card.id);
+                }
+            }
+            if let Some((owners, line)) = shown {
+                let mut d = s.clone();
+                for (a, o) in d.tasks.iter_mut().zip(owners) {
+                    a.owner = *o;
+                }
+                println!("winning line for that draft:");
+                print_line(&d, line);
+            }
+            println!("{secs:.3} s");
+        }
+    }
+}
+
 fn cmd_solve(args: &[String]) -> Result<(), String> {
     let file = args.iter().find(|a| !a.starts_with("--")).ok_or(USAGE)?;
     let use_cache = !args.iter().any(|a| a == "--no-cache");
+    let all_drafts = args.iter().any(|a| a == "--all-drafts");
+    let limit: u64 = flag(args, "--limit", 2000)?;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
     let list = notation::parse_all(&text).map_err(|e| format!("{file}: {e}"))?;
     for (i, s) in list.iter().enumerate() {
@@ -147,6 +211,10 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
         }
         if let Some(t) = &s.title {
             println!("{t}");
+        }
+        if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
+            print_drafts(s, None, limit);
+            continue;
         }
         let start = Instant::now();
         let opts = Options { use_cache, ..Options::default() };
@@ -168,6 +236,15 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
                     secs, stats.nodes, stats.cache_hits, stats.cache_size
                 );
             }
+        }
+        if all_drafts {
+            println!("other drafts:");
+            let reference: Vec<Owner> = s.tasks.iter().map(|a| a.owner).collect();
+            let mut open = s.clone();
+            for a in open.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
+                a.owner = Owner::Unknown;
+            }
+            print_drafts(&open, Some(reference), limit);
         }
     }
     Ok(())

@@ -1,5 +1,6 @@
 //! Rules engine and solver for The Crew: Mission Deep Sea.
 
+pub mod analysis;
 pub mod card;
 pub mod catalogue;
 pub mod draft;

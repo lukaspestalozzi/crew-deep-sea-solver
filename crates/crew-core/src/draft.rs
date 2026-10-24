@@ -49,6 +49,18 @@ pub fn for_each_draft(
     tasks: &[Assignment],
     players: usize,
     captain: usize,
+    f: impl FnMut(&[Owner]) -> bool,
+) -> u64 {
+    for_each_draft_filtered(tasks, players, captain, &|_, _| true, f)
+}
+
+/// As [`for_each_draft`], skipping drafts that give task `i` to player `p`
+/// when `allowed(i, p)` is false.
+pub fn for_each_draft_filtered(
+    tasks: &[Assignment],
+    players: usize,
+    captain: usize,
+    allowed: &dyn Fn(usize, usize) -> bool,
     mut f: impl FnMut(&[Owner]) -> bool,
 ) -> u64 {
     let Some(mut cap) = capacities(tasks, players, captain) else { return 0 };
@@ -56,7 +68,7 @@ pub fn for_each_draft(
     let open: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i].owner == Owner::Unknown).collect();
     let mut count = 0;
     let mut stop = false;
-    rec(tasks, &open, 0, captain, &mut cap, &mut owners, &mut count, &mut stop, &mut f);
+    rec(tasks, &open, 0, captain, allowed, &mut cap, &mut owners, &mut count, &mut stop, &mut f);
     count
 }
 
@@ -66,6 +78,7 @@ fn rec(
     open: &[usize],
     k: usize,
     captain: usize,
+    allowed: &dyn Fn(usize, usize) -> bool,
     cap: &mut [usize],
     owners: &mut [Owner],
     count: &mut u64,
@@ -84,12 +97,12 @@ fn rec(
     }
     let i = open[k];
     for p in 0..cap.len() {
-        if cap[p] == 0 || (p == captain && !tasks[i].card.captain_allowed()) {
+        if cap[p] == 0 || (p == captain && !tasks[i].card.captain_allowed()) || !allowed(i, p) {
             continue;
         }
         cap[p] -= 1;
         owners[i] = Owner::Player(p as u8);
-        rec(tasks, open, k + 1, captain, cap, owners, count, stop, f);
+        rec(tasks, open, k + 1, captain, allowed, cap, owners, count, stop, f);
         cap[p] += 1;
         if *stop {
             break;
