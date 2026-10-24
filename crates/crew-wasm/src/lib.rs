@@ -262,7 +262,9 @@ pub fn solve_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
 }
 
 /// Search drafts for tasks with owner `?`. With `all_drafts`, every task
-/// card is reassigned and the entered owners are the reference for the smallest fix.
+/// card is reassigned and the entered owners are the reference for the
+/// smallest fix; this asks whether another draft would have worked, so it
+/// starts from the deal and ignores played tricks.
 #[wasm_bindgen]
 pub fn drafts(text: &str, all_drafts: bool, limit: u32, progress: JsValue) -> String {
     let cb = progress_fn(&progress);
@@ -281,6 +283,7 @@ pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&d
     };
     let mut reference = None;
     if all_drafts {
+        s.played.clear();
         reference = Some(s.tasks.iter().map(|a| a.owner).collect::<Vec<_>>());
         for a in s.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
             a.owner = Owner::Unknown;

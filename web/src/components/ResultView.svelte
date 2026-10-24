@@ -56,10 +56,10 @@
   $effect(() => onverdict(verdict));
 
   // The line to show: the entered draft's, or a working draft's.
-  const shownLine = $derived.by((): { tricks: TrickOut[]; owners?: string[] } | null => {
+  const shownLine = $derived.by((): { tricks: TrickOut[]; owners?: string[]; fromFix?: boolean } | null => {
     if (solveOut?.verdict === 'feasible') return { tricks: solveOut.tricks };
     if (unknownOwners && drafts?.example) return drafts.example;
-    if (altDrafts?.closest) return altDrafts.closest;
+    if (altDrafts?.closest) return { ...altDrafts.closest, fromFix: true };
     return null;
   });
   const playedTricks = $derived.by((): TrickOut[] => {
@@ -202,7 +202,7 @@
         <span class="small" style="margin-top: 4px"><strong>{i18n.t('smallestChange')}</strong> ({i18n.t('changesOwner', { n: altDrafts.closest.distance })}):</span>
         {#each situation.tasks as t, i}
           {#if altDrafts.closest.owners[i] !== t.owner}
-            <span class="small">{textOf(t.id)}: {i18n.owner(t.owner)} → <strong>{i18n.owner(altDrafts.closest.owners[i])}</strong></span>
+            <span class="small">{i18n.owner(t.owner)} → <strong>{i18n.owner(altDrafts.closest.owners[i])}</strong> · {textOf(t.id)}</span>
           {/if}
         {/each}
       {/if}
@@ -272,9 +272,11 @@
     <TrickList tricks={playedTricks} players={situation.hands.length} />
   {/if}
 
-  {#if situation && shownLine}
+  {#if situation && shownLine && shownLine.tricks.length}
     <div class="row between">
-      <span class="label">{i18n.t('aWinningLine')}</span>
+      <span class="label">
+        {shownLine.fromFix ? (altDrafts?.closest?.distance ? i18n.t('lineWithFix') : i18n.t('lineFromDeal')) : i18n.t('aWinningLine')}
+      </span>
       {#if step === null}
         <button class="btn small outline-accent" onclick={() => (step = 1)}>{i18n.t('replay')}</button>
       {:else}
@@ -286,7 +288,7 @@
         </span>
       {/if}
     </div>
-    {#if shownLine.owners && unknownOwners}
+    {#if shownLine.owners && (unknownOwners || shownLine.fromFix)}
       <div class="panel small">
         {#each situation.tasks as t, i}
           <span>{i18n.owner(shownLine.owners[i])} · {textOf(t.id)}</span>
