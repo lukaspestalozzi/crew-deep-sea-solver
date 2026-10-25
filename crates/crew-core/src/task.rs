@@ -133,7 +133,11 @@ impl Kind {
                 }
             }
             Kind::WinNone(s) => {
-                if !won.intersect(*s).is_empty() || !top_subs(g, owner).intersect(*s).is_empty() {
+                let own_subs = g.hands[owner].intersect(Suit::Sub.cards());
+                if !won.intersect(*s).is_empty()
+                    || !top_subs(g, owner).intersect(*s).is_empty()
+                    || own_subs.minus(*s).len() < certain_sub_wins(g, owner)
+                {
                     Failed
                 } else if over || unplayed.intersect(*s).is_empty() {
                     Done
@@ -245,7 +249,7 @@ impl Kind {
             }
             Kind::ExactTricks(k) => {
                 let k = *k as i32;
-                if my + top_subs(g, owner).len() as i32 > k || my + r < k {
+                if my + certain_sub_wins(g, owner) as i32 > k || my + r < k {
                     Failed
                 } else if over {
                     Done
@@ -263,7 +267,7 @@ impl Kind {
                     if s == Suit::Sub {
                         // Only capturable submarines count; the top ones are certain.
                         avail = unplayed.intersect(s.cards()).iter().filter(|&c| can_capture(g, owner, c)).count() as u32;
-                        forced = top_subs(g, owner).len();
+                        forced = certain_sub_wins(g, owner);
                     }
                     let k = k as u32;
                     if have + if over { 0 } else { avail } < k || (*exact && have + forced > k) {
@@ -340,6 +344,7 @@ impl Kind {
                 let my_subs = won.intersect(Suit::Sub.cards());
                 if !my_subs.minus(CardSet::single(target)).is_empty()
                     || !top_subs(g, owner).minus(CardSet::single(target)).is_empty()
+                    || certain_sub_wins(g, owner) > g.hands[owner].contains(target) as u32
                     || others().any(|q| g.won[q].contains(target))
                     || (over && !my_subs.contains(target))
                     || (!my_subs.contains(target) && !can_capture(g, owner, target))
@@ -740,7 +745,7 @@ pub fn any_final_counts(g: &Game, mut test: impl FnMut(&[u8]) -> bool) -> bool {
     let mut lo = [0u8; crate::game::MAX_PLAYERS];
     let mut need = 0u8;
     for p in 0..n {
-        lo[p] = g.trick_counts[p] + top_subs(g, p).len() as u8;
+        lo[p] = g.trick_counts[p] + certain_sub_wins(g, p) as u8;
         need += lo[p] - g.trick_counts[p];
     }
     if need > r {
@@ -922,7 +927,36 @@ pub fn req_bounds<'a>(g: &Game, p: usize, reqs: impl Iterator<Item = &'a Req>) -
 }
 
 pub fn top_subs_count(g: &Game, p: usize) -> u64 {
-    top_subs(g, p).len() as u64
+    certain_sub_wins(g, p) as u64
+}
+
+/// Tricks player `p` is certain to win with its own submarines. A submarine
+/// loses its trick only to a higher submarine of another player in the same
+/// trick, and each of those can beat only one; so at least (own submarines
+/// played) − (largest pairing of own submarines with distinct higher ones
+/// of other players) win. A hand with more cards than tricks left may keep
+/// one card unplayed. Each such win also captures that submarine.
+pub fn certain_sub_wins(g: &Game, p: usize) -> u32 {
+    let subs = Suit::Sub.cards();
+    let own: Vec<u8> = g.hands[p].intersect(subs).iter().map(|c| c.value()).collect();
+    if own.is_empty() {
+        return 0;
+    }
+    let others = g.unplayed().minus(g.hands[p]).intersect(subs);
+    let mut free: Vec<u8> = others.iter().map(|c| c.value()).collect();
+    free.sort_unstable();
+    // Greedy pairing, lowest own submarine first with the lowest higher free one: maximal.
+    let mut own_sorted = own.clone();
+    own_sorted.sort_unstable();
+    let mut paired = 0;
+    for x in own_sorted {
+        if let Some(pos) = free.iter().position(|&y| y > x) {
+            free.remove(pos);
+            paired += 1;
+        }
+    }
+    let spare = g.hands[p].len().saturating_sub(g.tricks_left() as u32);
+    (own.len() as u32 - paired).saturating_sub(spare)
 }
 
 /// Submarines from the top that player `p` holds without a gap among the

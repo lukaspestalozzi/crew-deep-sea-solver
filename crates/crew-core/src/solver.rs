@@ -1634,4 +1634,26 @@ tasks:
         }
         assert!(feasible > 50 && infeasible > 50, "{feasible} {infeasible}");
     }
+
+    /// Player1 holds S2 and S3; the only higher submarine elsewhere is S4, which
+    /// can beat just one of them: Player1 certainly wins a trick with a submarine.
+    #[test]
+    fn submarine_pairing_gives_certain_wins() {
+        for task in ["no subs", "tricks =0"] {
+            let text = format!(
+                "crew 1
+players: 4
+Player1: S2 S3 P1 P2 P3 P4 P5 P6 P7 P8
+Player2: S4 P9 B1 B2 B3 B4 B5 B6 B7 B8
+Player3: S1 B9 G1 G2 G3 G4 G5 G6 G7 G8
+Player4: rest
+tasks:
+Player1: {task}"
+            );
+            let s = crate::notation::parse(&text).unwrap();
+            let (v, stats) = solve(&s, &Options::default()).unwrap();
+            assert_eq!(v, Verdict::Infeasible, "{task}");
+            assert!(stats.nodes <= 2, "{task}: {} nodes", stats.nodes);
+        }
+    }
 }
