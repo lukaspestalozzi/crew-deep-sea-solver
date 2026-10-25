@@ -217,7 +217,7 @@ impl Kind {
                     TrickProp::CardWonBySub(_) if g.hands[owner].intersect(Suit::Sub.cards()).is_empty() => Failed,
                     // The owner plays one card per trick: not both the card and the submarine.
                     TrickProp::CardWonBySub(c) if g.hands[owner].contains(*c) => Failed,
-                    _ if !trick_still_possible(p, g) => Failed,
+                    _ if !trick_still_possible(p, g) || !owner_can_win_such_trick(p, g, owner) => Failed,
                     _ => Open,
                 }
             }
@@ -644,6 +644,57 @@ impl Kind {
 /// contributes one card, so each hand must still hold a fitting card.
 /// (Between tricks only; in a 3-player game the leftover card is included,
 /// which keeps the check necessary.)
+/// For value properties (all below / above / even / odd, sums): can `owner`
+/// still win a trick with the property? Such a trick has no submarines, so
+/// it is won by the owner's card of the led suit; that card must fit, and
+/// every other player adds a fitting colour card that does not beat it: a
+/// lower card of the led suit, or a card of another suit (once out of the
+/// led suit). For sums, the owner's card plus each player's best (or worst)
+/// such card must reach the bound. Other properties: true.
+fn owner_can_win_such_trick(p: &TrickProp, g: &Game, owner: usize) -> bool {
+    let fits = |c: Card| -> bool {
+        let v = c.value();
+        !c.is_sub()
+            && match p {
+                TrickProp::AllBelow(b) => v < *b,
+                TrickProp::AllAbove(b) => v > *b,
+                TrickProp::AllEven => v % 2 == 0,
+                TrickProp::AllOdd => v % 2 == 1,
+                _ => true,
+            }
+    };
+    let ni = g.n - 3;
+    let sums = matches!(p, TrickProp::SumAbove(_) | TrickProp::SumBelow(_) | TrickProp::SumIn(_));
+    if !sums && !matches!(p, TrickProp::AllBelow(_) | TrickProp::AllAbove(_) | TrickProp::AllEven | TrickProp::AllOdd) {
+        return true;
+    }
+    g.hands[owner].iter().filter(|&x| fits(x)).any(|x| {
+        let (mut lo, mut hi) = (x.value() as u32, x.value() as u32);
+        for q in (0..g.n).filter(|&q| q != owner) {
+            let range = g.hands[q]
+                .iter()
+                .filter(|&y| fits(y) && (y.suit() != x.suit() || y.value() < x.value()))
+                .fold(None, |acc: Option<(u32, u32)>, y| {
+                    let v = y.value() as u32;
+                    Some(acc.map_or((v, v), |(a, b)| (a.min(v), b.max(v))))
+                });
+            match range {
+                Some((a, b)) => {
+                    lo += a;
+                    hi += b;
+                }
+                None => return false,
+            }
+        }
+        match p {
+            TrickProp::SumAbove(b) => hi > b[ni] as u32,
+            TrickProp::SumBelow(b) => lo < b[ni] as u32,
+            TrickProp::SumIn(vals) => vals.iter().any(|&v| lo <= v as u32 && v as u32 <= hi),
+            _ => true,
+        }
+    })
+}
+
 fn trick_still_possible(p: &TrickProp, g: &Game) -> bool {
     let colour_values = |p: usize| g.hands[p].minus(Suit::Sub.cards()).iter().map(|c| c.value() as u32);
     let players = 0..g.n;

@@ -36,6 +36,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D16 | Submarines and numbers | Submarines do not count as numbers or in sum tasks | Confirmed by Q on 2026-10-24 |
 | D17 | Generalized tasks | Every task of the official categories as a parametric ID; inferred difficulty (rule of thumb, ≈) now, measured later; rule cards not generated; random draws and the default list use official cards only; official cards get marked once Q supplies the 96 | Decided by Q on 2026-10-24 |
 | D18 | Search architecture | One search over all drafts (pairs of task and possible owner); pluggable move decider (also for the bot) and strategy; default: restarts alternating task-aware and deck order; best-first and Zobrist hashing kept as options; verdict first, draft count / critical decisions / other drafts on demand; per-draft and per-deal node limits report "undecided"; "Test 100 deals" asks "does some draft work" per deal | Q asked for speed and a generic search (A*); A* pushed back on (no path cost), best-first measured instead (2026-10-25) |
+| D19 | Early failure detection, exact counts | Combined checks (trick windows from card requirements, card destiny, submarine pairing, missing requirements and rule fixes), task-aware ordering for more task kinds with random tie-break restarts; the draft count and "Test 100 deals" are exact, "undecided" only when cancelled | Q asked for clear answers instead of "undecided" (2026-10-25) |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -326,3 +327,9 @@ Measured 2026-10-25 (native, 20 s limit per situation; 60 random missions,
 Q's example (3 players, 7 tasks, 120 drafts): verdict in 0.001 s native and
 0.2 s in the browser (before: over 5 minutes); counting all drafts 9.8 s native,
 17 s in the browser (25 work, 75 undecided at the per-draft limit).
+
+After D19 (2026-10-25, native; 21 slow missions from 180 random ones at
+difficulty 10/12, 30 s limit): still open 11 → 5, total 433 s → 245 s.
+Benchmark set with owners `?`: 21.7 s → 0.9 s, none at the limit. Q's
+example: verdict in 90 positions; the exact draft count reaches 55 working
+drafts with 42 open after 10 minutes (before: 45 / 52) and is not finished.

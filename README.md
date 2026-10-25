@@ -35,7 +35,7 @@ cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
 - `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
-- `--count-drafts`: also count the drafts that work, each on its own (sampled above `--limit`, default 2000; a draft that hits the node limit counts as undecided).
+- `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once.
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
 - `--dfs`, `--best-first`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
 - `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file.
@@ -48,9 +48,14 @@ With fixed owners each task has one pair; with owner `?` one search covers
 all legal drafts: a branch is lost once no complete legal draft of surviving
 pairs remains, and won once some draft has all its tasks done.
 
-- Pruning: a task fails as soon as it can no longer be met; all trick-count
-  rules (exact counts, vs. captain, most/fewest, …) are checked jointly over
-  the possible final splits and drafts; certain submarine wins are counted.
+- Pruning: a task fails as soon as it can no longer be met. Combined checks
+  between tricks: every task's card requirements (cards to win or not to
+  win, counts of a suit or value, tricks it still needs) give each player a
+  window for its final trick count; with all trick-count rules (exact counts,
+  vs. captain, most/fewest, …) they are checked jointly over the possible
+  final splits and drafts; who may still win each card is checked across
+  players; certain wins come from submarine pairing (an own submarine loses
+  only to a higher one of another player in the same trick).
 - Positions proven lost are cached (128-bit keys; by default the hands by
   relative rank, so positions differing only in interchangeable cards share
   a key). The cache has a size limit.
