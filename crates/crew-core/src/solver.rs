@@ -217,43 +217,8 @@ pub fn status(g: &Game, tasks: &Resolved) -> Status {
 }
 
 fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>>, Stats) {
-    let boundaries = if opts.merge_cards {
-        model.kinds.iter().fold(NO_BOUNDARIES, |acc, k| merge(acc, k.boundaries()))
-    } else {
-        [0x1FF; 5]
-    };
-    // The combined check covers trick-count rules and card requirements alike.
-    let has_count_rules = opts.count_check;
-    let mut search = Search {
-        model,
-        opts,
-        boundaries,
-        has_count_rules,
-        count_memo: HashMap::default(),
-        draft_memo: HashMap::default(),
-        failed: HashSet::default(),
-        stats: Stats::default(),
-        line: Vec::new(),
-        won: 0,
-        stopped: None,
-        zob: hands_zobrist(&g),
-        decider: opts.decider,
-        round_limit: None,
-        pairs_buf: Vec::new(),
-        settled_buf: Vec::new(),
-    };
-    let alive = search.model.alive0;
-    let result = match opts.strategy {
-        Strategy::Dfs => search.dfs(&mut g, alive, 0),
-        Strategy::Portfolio { first_budget } => search.portfolio(&mut g, alive, first_budget),
-        Strategy::BestFirst { max_positions } => match search.best_first(&g, alive, max_positions) {
-            Some(r) => r,
-            None => {
-                search.line.clear();
-                search.dfs(&mut g, alive, 0)
-            }
-        },
-    };
+    let mut search = Search::new(&g, model, opts);
+    let result = search.execute(&mut g);
     let verdict = match result {
         Some(true) => Verdict::Feasible(std::mem::take(&mut search.line)),
         Some(false) => Verdict::Infeasible,
@@ -262,6 +227,111 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
     let owners = matches!(verdict, Verdict::Feasible(_)).then(|| search.model.owners_of(search.won));
     search.stats.cache_size = search.failed.len();
     (verdict, owners, search.stats)
+}
+
+/// The result of deciding a list of drafts: per draft, a winning line or
+/// `None` (infeasible).
+pub type DraftDecisions = Vec<Option<Vec<Card>>>;
+
+/// Decide every draft in `drafts` (one owner per task, as in
+/// [`Situation::tasks`]); exact. Rounds with a node budget that doubles each
+/// round: every open draft is first checked against the winning lines found so
+/// far (a line is legal whatever the owners), then searched alone; after each
+/// round one search over all open drafts together may prove them all
+/// infeasible at once (or settle those its line completes). `progress` gets
+/// (feasible so far, still open). `Ok(None)` if cancelled.
+pub fn decide_drafts(
+    s: &Situation,
+    drafts: &[Vec<Owner>],
+    opts: &Options,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<Option<DraftDecisions>, SolveError> {
+    let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
+    if redeal(s).is_some() {
+        return Ok(Some(vec![None; drafts.len()]));
+    }
+    let with_owners = |d: &[Owner]| {
+        let mut x = s.clone();
+        for (a, o) in x.tasks.iter_mut().zip(d) {
+            a.owner = *o;
+        }
+        x
+    };
+    // Does this line, played from the situation, complete the draft's tasks?
+    let completes = |d: &[Owner], line: &[Card]| -> bool {
+        let Ok((mut h, tasks)) = prepare(&with_owners(d)) else { return false };
+        for &c in line {
+            if !h.legal_moves().contains(c) {
+                return false;
+            }
+            h.play(c);
+        }
+        h.current.is_empty() && status(&h, &tasks) == Status::Done
+    };
+    let as_index = |d: &Vec<Owner>| -> Vec<u8> { d.iter().map(|o| if let Owner::Player(p) = o { *p } else { 0 }).collect() };
+    let cancelled = || opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let mut out: Vec<Option<Option<Vec<Card>>>> = vec![None; drafts.len()];
+    let mut lines: Vec<Vec<Card>> = Vec::new();
+    let mut open: Vec<usize> = (0..drafts.len()).collect();
+    let mut found = 0;
+    let mut budget: u64 = 100_000;
+    while !open.is_empty() {
+        // Each open draft alone.
+        let mut still = Vec::new();
+        for (k, &i) in open.iter().enumerate() {
+            if let Some(f) = progress {
+                f(found, open.len() - k + still.len());
+            }
+            if let Some(line) = lines.iter().find(|l| completes(&drafts[i], l)) {
+                out[i] = Some(Some(line.clone()));
+                found += 1;
+                continue;
+            }
+            match solve(&with_owners(&drafts[i]), &Options { node_limit: Some(budget), ..opts.clone() })?.0 {
+                Verdict::Feasible(line) => {
+                    out[i] = Some(Some(line.clone()));
+                    found += 1;
+                    lines.push(line);
+                }
+                Verdict::Infeasible | Verdict::Redeal(_) => out[i] = Some(None),
+                Verdict::Undecided => still.push(i),
+                Verdict::Cancelled => return Ok(None),
+            }
+            if cancelled() {
+                return Ok(None);
+            }
+        }
+        open = still;
+        if open.is_empty() {
+            break;
+        }
+        // All open drafts together.
+        let mut model = Model::drafts(s, &g);
+        model.allowed = Some(open.iter().map(|&i| as_index(&drafts[i])).collect());
+        match run(g.clone(), model, &Options { node_limit: Some(budget), ..opts.clone() }).0 {
+            Verdict::Infeasible => {
+                for &i in &open {
+                    out[i] = Some(None);
+                }
+                open.clear();
+            }
+            Verdict::Feasible(line) => {
+                open.retain(|&i| {
+                    let done = completes(&drafts[i], &line);
+                    if done {
+                        out[i] = Some(Some(line.clone()));
+                        found += 1;
+                    }
+                    !done
+                });
+                lines.push(line);
+            }
+            Verdict::Cancelled => return Ok(None),
+            _ => {}
+        }
+        budget = budget.saturating_mul(2);
+    }
+    Ok(Some(out.into_iter().map(|d| d.unwrap()).collect()))
 }
 
 // ---------------------------------------------------------------- model: tasks and possible owners
@@ -292,12 +362,14 @@ struct Model {
     /// Seats left per player for the open tasks; `None`: no legal draft.
     caps: Option<[u8; MAX_PLAYERS]>,
     open: Vec<usize>,
+    /// If set, only these drafts count (owner index per task; 0 for rule cards).
+    allowed: Option<Vec<Vec<u8>>>,
 }
 
 impl Model {
     fn fixed(tasks: &Resolved) -> Model {
         assert!(tasks.len() <= 25, "at most 25 tasks");
-        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: Some([0; MAX_PLAYERS]), open: Vec::new() };
+        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: Some([0; MAX_PLAYERS]), open: Vec::new(), allowed: None };
         for (t, &(k, o)) in tasks.iter().enumerate() {
             m.kinds.push(k);
             m.slots.push(if k.is_rule() { Slot::Global } else { Slot::Fixed });
@@ -308,7 +380,7 @@ impl Model {
 
     fn drafts(s: &Situation, g: &Game) -> Model {
         assert!(s.tasks.len() <= 25, "at most 25 tasks");
-        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: None, open: Vec::new() };
+        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: None, open: Vec::new(), allowed: None };
         for (t, a) in s.tasks.iter().enumerate() {
             m.kinds.push(&a.card.kind);
             match a.owner {
@@ -367,6 +439,14 @@ impl Model {
                 return false;
             }
         }
+        if let Some(list) = &self.allowed {
+            if let Some(&ok) = memo.get(&mask) {
+                return ok;
+            }
+            let ok = list.iter().any(|d| d.iter().enumerate().all(|(t, &p)| bits_of(mask, t) & (1 << p) != 0 || self.slots[t] == Slot::Global && bits_of(mask, t) != 0));
+            memo.insert(mask, ok);
+            return ok;
+        }
         if self.open.is_empty() {
             return true;
         }
@@ -382,6 +462,16 @@ impl Model {
 
     /// Owners of a complete draft within `mask` (which must have one).
     fn owners_of(&self, mask: u128) -> Vec<Owner> {
+        if let Some(list) = &self.allowed {
+            if let Some(d) = list.iter().find(|d| d.iter().enumerate().all(|(t, &p)| bits_of(mask, t) & (1 << p) != 0 || self.slots[t] == Slot::Global)) {
+                return self
+                    .slots
+                    .iter()
+                    .zip(d)
+                    .map(|(s, &p)| if *s == Slot::Global { Owner::Crew } else { Owner::Player(p) })
+                    .collect();
+            }
+        }
         let mut out = vec![0u8; self.slots.len()];
         let mut caps = self.caps.unwrap_or([0; MAX_PLAYERS]);
         self.assign(0, mask, &mut caps, &mut out);
@@ -560,6 +650,51 @@ struct Search<'o, 'a> {
     /// Reused buffers of the combined check.
     pairs_buf: Vec<(u128, Option<CountRule>, (u8, u8))>,
     settled_buf: Vec<(usize, Req)>,
+}
+
+impl<'o, 'a> Search<'o, 'a> {
+    fn new(g: &Game, model: Model, opts: &'o Options<'a>) -> Self {
+        let boundaries = if opts.merge_cards {
+            model.kinds.iter().fold(NO_BOUNDARIES, |acc, k| merge(acc, k.boundaries()))
+        } else {
+            [0x1FF; 5]
+        };
+        Search {
+            model,
+            opts,
+            boundaries,
+            // The combined check covers trick-count rules and card requirements alike.
+            has_count_rules: opts.count_check,
+            count_memo: HashMap::default(),
+            draft_memo: HashMap::default(),
+            failed: HashSet::default(),
+            stats: Stats::default(),
+            line: Vec::new(),
+            won: 0,
+            stopped: None,
+            zob: hands_zobrist(g),
+            decider: opts.decider,
+            round_limit: None,
+            pairs_buf: Vec::new(),
+            settled_buf: Vec::new(),
+        }
+    }
+
+    /// Run the configured strategy from `g` (restored afterwards).
+    fn execute(&mut self, g: &mut Game) -> Option<bool> {
+        let alive = self.model.alive0;
+        match self.opts.strategy {
+            Strategy::Dfs => self.dfs(g, alive, 0),
+            Strategy::Portfolio { first_budget } => self.portfolio(g, alive, first_budget),
+            Strategy::BestFirst { max_positions } => match self.best_first(g, alive, max_positions) {
+                Some(r) => r,
+                None => {
+                    self.line.clear();
+                    self.dfs(g, alive, 0)
+                }
+            },
+        }
+    }
 }
 
 impl Search<'_, '_> {
@@ -1459,5 +1594,44 @@ tasks:
             assert_eq!(v, Verdict::Infeasible, "{tasks}");
             assert!(stats.nodes <= 2, "{tasks}: {} nodes", stats.nodes);
         }
+    }
+
+    /// Deciding all drafts by repeated searches agrees with solving each one,
+    /// and every line returned completes its draft.
+    #[test]
+    fn decide_drafts_agrees_with_each_draft() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(51);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..80 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 4 }, 2 + case % 3);
+            let g = s.game().unwrap();
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let mut drafts = Vec::new();
+            crate::draft::for_each_draft(&s.tasks, n, g.captain as usize, |o| {
+                drafts.push(o.to_vec());
+                true
+            });
+            let decided = decide_drafts(&s, &drafts, &Options::default(), None).unwrap().unwrap();
+            for (d, r) in drafts.iter().zip(&decided) {
+                let mut fixed = s.clone();
+                for (a, o) in fixed.tasks.iter_mut().zip(d) {
+                    a.owner = *o;
+                }
+                let alone = solve(&fixed, &Options::plain()).unwrap().0;
+                match (r, &alone) {
+                    (Some(line), Verdict::Feasible(_)) => {
+                        check_line(&fixed, line);
+                        feasible += 1;
+                    }
+                    (None, Verdict::Infeasible) => infeasible += 1,
+                    _ => panic!("case {case} draft {d:?}: together {:?}, alone {alone:?}", r.is_some()),
+                }
+            }
+        }
+        assert!(feasible > 50 && infeasible > 50, "{feasible} {infeasible}");
     }
 }

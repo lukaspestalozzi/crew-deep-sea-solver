@@ -17,7 +17,7 @@ pub struct DraftReport {
     pub checked: u64,
     /// Feasible drafts among those checked.
     pub working: u64,
-    /// Drafts checked without an answer (only when not settled, or cancelled).
+    /// Drafts left without an answer (only when cancelled).
     pub undecided: u64,
     /// True if `checked < total` because drafts were sampled.
     pub sampled: bool,
@@ -41,14 +41,9 @@ pub struct DraftOptions<'a> {
     /// Owners to compare against for the smallest fix (e.g. the draft entered).
     pub reference: Option<Vec<Owner>>,
     pub cancel: Option<&'a AtomicBool>,
-    /// Called with (drafts checked, drafts planned, working so far, drafts
-    /// still open): after each draft of the first pass, then while the open
-    /// ones are settled.
+    /// Called with (drafts decided, drafts planned, working so far, drafts
+    /// still open) before each search.
     pub progress: Option<&'a dyn Fn(u64, u64, u64, u64)>,
-    /// Nodes per draft in the first pass; drafts that reach it stay open.
-    pub node_limit: Option<u64>,
-    /// After the first pass, search the open drafts to the end (exact count).
-    pub settle: bool,
 }
 
 impl Default for DraftOptions<'_> {
@@ -59,8 +54,6 @@ impl Default for DraftOptions<'_> {
             reference: None,
             cancel: None,
             progress: None,
-            node_limit: Some(1_000_000),
-            settle: true,
         }
     }
 }
@@ -70,12 +63,12 @@ fn distance(a: &[Owner], b: &[Owner]) -> usize {
 }
 
 /// Search the drafts for the tasks with owner `?` (fixed owners stay): the
-/// exact yes/no over all drafts in one search, then each draft counted on its
-/// own (up to `node_limit` nodes each).
+/// exact yes/no over all drafts in one search, then every draft (or a sample
+/// above `limit`) decided by [`solver::decide_drafts`].
 pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     let (n, captain) = (g.n, g.captain as usize);
-    let solve_opts = Options { cancel: opts.cancel, node_limit: opts.node_limit, ..Options::default() };
+    let solve_opts = Options { cancel: opts.cancel, ..Options::default() };
 
     let (any_works, one_tree_example) = match solver::solve_drafts(s, &Options { cancel: opts.cancel, ..Options::default() })? {
         (Verdict::Feasible(line), Some(owners), _) => (Some(true), Some((owners, line))),
@@ -117,54 +110,12 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
         impossible_pairs,
     };
 
-    // Solve one draft (up to `limit` nodes); None if cancelled. A draft that
-    // reaches the limit is kept in `open` for the second pass.
+    // The drafts to decide: all of them, or a sample.
     let planned = total.min(opts.limit);
-    let solve_draft = |owners: &[Owner], limit: Option<u64>, report: &mut DraftReport, open: &mut Vec<Vec<Owner>>| -> Option<()> {
-        let mut d = s.clone();
-        for (a, o) in d.tasks.iter_mut().zip(owners) {
-            a.owner = *o;
-        }
-        match solver::solve(&d, &Options { node_limit: limit, ..solve_opts.clone() }) {
-            Ok((Verdict::Feasible(line), _)) => {
-                report.working += 1;
-                if let Some(r) = &opts.reference {
-                    let dist = distance(owners, r);
-                    if report.closest.as_ref().is_none_or(|c| dist < c.1) {
-                        report.closest = Some((owners.to_vec(), dist, line.clone()));
-                    }
-                }
-                if report.example.is_none() {
-                    report.example = Some((owners.to_vec(), line));
-                }
-            }
-            Ok((Verdict::Cancelled, _)) => return None,
-            Ok((Verdict::Undecided, _)) => open.push(owners.to_vec()),
-            _ => {}
-        }
-        Some(())
-    };
-    let tell = |r: &DraftReport, open: usize| {
-        if let Some(p) = opts.progress {
-            p(r.checked, planned, r.working, open as u64);
-        }
-    };
-    let bad = |owners: &[Owner]| {
-        owners.iter().enumerate().any(|(i, o)| matches!(o, Owner::Player(p) if s.tasks[i].owner == Owner::Unknown && !allowed(i, *p as usize)))
-    };
-
-    // First pass, with the node limit: every draft, or a sample.
-    let mut open: Vec<Vec<Owner>> = Vec::new();
-    let mut cancelled = false;
+    let mut drafts: Vec<Vec<Owner>> = Vec::new();
     if total <= opts.limit {
-        // Exhaustive: drafts with an impossible pair are failures without solving.
         draft::for_each_draft(&s.tasks, n, captain, |owners| {
-            report.checked += 1;
-            if !bad(owners) && solve_draft(owners, opts.node_limit, &mut report, &mut open).is_none() {
-                cancelled = true;
-                return false;
-            }
-            tell(&report, open.len());
+            drafts.push(owners.to_vec());
             true
         });
     } else {
@@ -175,31 +126,44 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
         while (seen.len() as u64) < opts.limit && tries < opts.limit * 20 {
             tries += 1;
             let Some(owners) = draft::random_draft(&s.tasks, n, captain, &mut rng) else { break };
-            if !seen.insert(owners.clone()) {
-                continue;
-            }
-            report.checked += 1;
-            if !bad(&owners) && solve_draft(&owners, opts.node_limit, &mut report, &mut open).is_none() {
-                cancelled = true;
-                break;
-            }
-            tell(&report, open.len());
-        }
-    }
-
-    // Second pass: the open drafts, to the end.
-    if opts.settle && !cancelled {
-        let mut rest: Vec<Vec<Owner>> = Vec::new();
-        while let Some(owners) = open.pop() {
-            tell(&report, open.len() + 1);
-            if solve_draft(&owners, None, &mut report, &mut rest).is_none() {
-                open.push(owners);
-                break;
+            if seen.insert(owners.clone()) {
+                drafts.push(owners);
             }
         }
-        open.extend(rest);
     }
-    report.undecided = open.len() as u64;
+    // Drafts with a pair impossible on its own fail without a search.
+    let bad = |owners: &[Owner]| {
+        owners.iter().enumerate().any(|(i, o)| matches!(o, Owner::Player(p) if s.tasks[i].owner == Owner::Unknown && !allowed(i, *p as usize)))
+    };
+    let rest: Vec<Vec<Owner>> = drafts.iter().filter(|d| !bad(d)).cloned().collect();
+    let skipped = (drafts.len() - rest.len()) as u64;
+    let tell = |working: usize, open: usize| {
+        if let Some(p) = opts.progress {
+            p(planned - open as u64, planned, working as u64, open as u64);
+        }
+    };
+    match solver::decide_drafts(s, &rest, &solve_opts, Some(&tell))? {
+        None => {
+            report.checked = skipped;
+            report.undecided = rest.len() as u64;
+        }
+        Some(decided) => {
+            report.checked = drafts.len() as u64;
+            for (owners, line) in rest.iter().zip(decided) {
+                let Some(line) = line else { continue };
+                report.working += 1;
+                if let Some(r) = &opts.reference {
+                    let dist = distance(owners, r);
+                    if report.closest.as_ref().is_none_or(|c| dist < c.1) {
+                        report.closest = Some((owners.clone(), dist, line.clone()));
+                    }
+                }
+                if report.example.is_none() {
+                    report.example = Some((owners.clone(), line));
+                }
+            }
+        }
+    }
     if report.example.is_none() {
         report.example = one_tree_example;
     }
@@ -555,13 +519,19 @@ tasks:
     }
 
     #[test]
-    fn settling_open_drafts_gives_the_exact_count() {
+    fn draft_count_matches_each_draft_solved_alone() {
         let s = situation("?: win B4\n?: win P9 Y8\n?: first-trick\n?: tricks =2");
-        let exact = draft_search(&s, &DraftOptions { node_limit: None, ..Default::default() }).unwrap();
-        // A tiny first-pass limit leaves most drafts open; settling must close all of them.
-        let settled = draft_search(&s, &DraftOptions { node_limit: Some(50), ..Default::default() }).unwrap();
-        assert_eq!((settled.working, settled.undecided, settled.checked), (exact.working, 0, exact.checked));
-        let open = draft_search(&s, &DraftOptions { node_limit: Some(50), settle: false, ..Default::default() }).unwrap();
-        assert!(open.undecided > 0 && open.working + open.undecided >= exact.working);
+        let r = draft_search(&s, &DraftOptions::default()).unwrap();
+        let g = s.game().unwrap();
+        let mut working = 0;
+        draft::for_each_draft(&s.tasks, g.n, g.captain as usize, |owners| {
+            let mut d = s.clone();
+            for (a, o) in d.tasks.iter_mut().zip(owners) {
+                a.owner = *o;
+            }
+            working += matches!(solver::solve(&d, &Options::plain()).unwrap().0, Verdict::Feasible(_)) as u64;
+            true
+        });
+        assert_eq!((r.working, r.undecided, r.checked), (working, 0, r.total));
     }
 }
