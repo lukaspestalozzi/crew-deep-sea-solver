@@ -35,6 +35,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D15 | Import / export | Every situation can be saved, exported and imported, including sealed hands | Backup, moving between devices; no cheating expected |
 | D16 | Submarines and numbers | Submarines do not count as numbers or in sum tasks | Confirmed by Q on 2026-10-24 |
 | D17 | Generalized tasks | Every task of the official categories as a parametric ID; inferred difficulty (rule of thumb, ≈) now, measured later; rule cards not generated; random draws and the default list use official cards only; official cards get marked once Q supplies the 96 | Decided by Q on 2026-10-24 |
+| D18 | Search architecture | One search over all drafts (pairs of task and possible owner); pluggable move decider (also for the bot) and strategy; default: restarts alternating task-aware and deck order; best-first and Zobrist hashing kept as options; verdict first, draft count / critical decisions / other drafts on demand; per-draft and per-deal node limits report "undecided"; "Test 100 deals" asks "does some draft work" per deal | Q asked for speed and a generic search (A*); A* pushed back on (no path cost), best-first measured instead (2026-10-25) |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -300,10 +301,28 @@ What the code in this repository does and does not yet cover, compared with this
 | Logbook draft modes (free distribution, one player, captain none, hardest first) | **Not implemented**: only the standard draft |
 | Explore statistics Q11 (printed vs measured, share per sum, failure-causing tasks) | **Not implemented** beyond `crew bench` and "Test 100 deals" |
 | "Exact" button for sampled draft counts | **Not implemented** (CLI: raise `--limit`) |
-| Move ordering ("most promising plays first") | **Not implemented** |
+| Move ordering ("most promising plays first") | Done (D18): task-aware decider, restarts with deck order |
+| Search over all drafts in one tree, best-first, Zobrist option, cache limit | Done (D18) |
 | German task texts, verified difficulty values | Waiting for the card photos |
 | Hidden-hand bot, photo recognition, mission presets | Later, by design |
 
 Measured on random missions at difficulty 7: most solve in milliseconds; about
 4 in 80 three- and four-player missions take longer than 10 s; none at 5 players.
 In the browser the solver runs about 1.5× slower than native.
+
+Measured 2026-10-25 (native, 20 s limit per situation; 60 random missions,
+3/4/5 players, difficulty 7 and 10; the "open" set is the same with every owner
+`?` plus Q's example):
+
+| Version | Fixed owners: total | Owners `?`: total (time to verdict) | Owners `?`: at limit |
+| --- | --- | --- | --- |
+| Before (separate search per draft, deck order) | 24.7 s | 325.9 s | 13 of 61 |
+| One tree, task-aware DFS | 28.3 s | 42.1 s | 2 |
+| One tree, deck order DFS | 30.4 s | 69.6 s | 2 |
+| One tree, best-first | 44.9 s | 44.8 s | 2 |
+| One tree, Zobrist keys | 35.9 s | 42.4 s | 2 |
+| **One tree, restarts (default)** | **24.1 s** | **21.7 s** | **1** |
+
+Q's example (3 players, 7 tasks, 120 drafts): verdict in 0.001 s native and
+0.2 s in the browser (before: over 5 minutes); counting all drafts 9.8 s native,
+17 s in the browser (25 work, 75 undecided at the per-draft limit).

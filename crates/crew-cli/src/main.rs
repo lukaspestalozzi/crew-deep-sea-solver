@@ -29,20 +29,21 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--best-first] [--deck-order] [--zobrist]
+  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--dfs] [--best-first] [--deck-order] [--zobrist]
                                  solve every situation in a .crew file; tasks with
                                  owner ? are searched over all legal drafts at once;
                                  --count-drafts also counts the drafts that work (sampled
                                  above N drafts); --all-drafts also checks other drafts;
                                  --analyse adds critical decisions, smallest conflict
-                                 and point of no return; --best-first, --deck-order and
-                                 --zobrist switch strategy, move order and position hashing
+                                 and point of no return; --dfs, --best-first,
+                                 --deck-order and --zobrist switch strategy (default:
+                                 restarts alternating move orders), move order and hashing
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
                                  random deals, tasks drawn to the target sum, random legal draft
   crew bench --load FILE [--timeout SECS] [-v]
                                  the same timing over the situations in FILE; with owner ?
                                  the verdict over all drafts is timed
-                                 (bench also takes --best-first, --deck-order, --zobrist, --no-cache)";
+                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache)";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -106,6 +107,9 @@ fn search_options(args: &[String]) -> Options<'static> {
     }
     if args.iter().any(|a| a == "--zobrist") {
         o.zobrist = true;
+    }
+    if args.iter().any(|a| a == "--dfs") {
+        o.strategy = solver::Strategy::Dfs;
     }
     if args.iter().any(|a| a == "--best-first") {
         o.strategy = solver::Strategy::BestFirst { max_positions: 2_000_000 };
@@ -227,6 +231,9 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
                 println!("about {pct:.0}% of {} legal drafts work ({} sampled)", r.total, r.checked);
             } else {
                 println!("{} of {} legal drafts work", r.working, r.total);
+            }
+            if r.undecided > 0 {
+                println!("{} undecided (node limit per draft)", r.undecided);
             }
             for &(i, p) in &r.impossible_pairs {
                 println!("  impossible on its own: Player{} · {}", p + 1, s.tasks[i].card.id);

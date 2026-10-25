@@ -69,6 +69,12 @@ pub enum Strategy {
     /// first. Keeps every open position in memory; falls back to depth-first
     /// once more than `max_positions` positions were generated.
     BestFirst { max_positions: usize },
+    /// Depth-first restarts that alternate the options' decider with the deck
+    /// order, with node budgets doubling from `first_budget`. The cache of
+    /// lost positions is kept across restarts (it does not depend on the move
+    /// order). Search times vary a lot with the move order; this costs about
+    /// two to three times the better of the two.
+    Portfolio { first_budget: u64 },
 }
 
 #[derive(Clone)]
@@ -104,7 +110,7 @@ impl Default for Options<'_> {
             cancel: None,
             progress: None,
             decider: &TASK_AWARE,
-            strategy: Strategy::Dfs,
+            strategy: Strategy::Portfolio { first_budget: 100_000 },
             cache_limit: 4_000_000,
             node_limit: None,
             zobrist: false,
@@ -113,9 +119,17 @@ impl Default for Options<'_> {
 }
 
 impl Options<'_> {
-    /// No cache, no merging, no joint count check, deck order: the reference search.
+    /// No cache, no merging, no joint count check, deck order, plain
+    /// depth-first: the reference search.
     pub fn plain() -> Self {
-        Options { use_cache: false, merge_cards: false, count_check: false, decider: &DECK_ORDER, ..Options::default() }
+        Options {
+            use_cache: false,
+            merge_cards: false,
+            count_check: false,
+            decider: &DECK_ORDER,
+            strategy: Strategy::Dfs,
+            ..Options::default()
+        }
     }
 }
 
@@ -218,10 +232,13 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
         won: 0,
         stopped: None,
         zob: hands_zobrist(&g),
+        decider: opts.decider,
+        round_limit: None,
     };
     let alive = search.model.alive0;
     let result = match opts.strategy {
         Strategy::Dfs => search.dfs(&mut g, alive, 0),
+        Strategy::Portfolio { first_budget } => search.portfolio(&mut g, alive, first_budget),
         Strategy::BestFirst { max_positions } => match search.best_first(&g, alive, max_positions) {
             Some(r) => r,
             None => {
@@ -469,6 +486,10 @@ struct Search<'o, 'a> {
     stopped: Option<Verdict>,
     /// Zobrist hash of (card, holder) over all cards in hand.
     zob: u128,
+    /// Move order in use (the options' decider, or another during restarts).
+    decider: &'o dyn MoveDecider,
+    /// Node count at which the current restart stops.
+    round_limit: Option<u64>,
 }
 
 impl Search<'_, '_> {
@@ -661,7 +682,7 @@ impl Search<'_, '_> {
             k += 1;
         }
         let pos = Position { game: g, kinds: &self.model.kinds, alive, done };
-        self.opts.decider.order(&pos, &mut buf[..k]);
+        self.decider.order(&pos, &mut buf[..k]);
         k
     }
 
@@ -675,6 +696,9 @@ impl Search<'_, '_> {
             }
             if self.opts.node_limit.is_some_and(|l| self.stats.nodes >= l) {
                 self.stopped = Some(Verdict::Undecided);
+                return false;
+            }
+            if self.round_limit.is_some_and(|l| self.stats.nodes >= l) {
                 return false;
             }
             if self.stats.nodes & 0xF_FFFF == 0 {
@@ -751,6 +775,25 @@ impl Search<'_, '_> {
             self.remember_lost(k);
         }
         Some(false)
+    }
+
+    /// Restarts alternating move orders with doubling budgets; see
+    /// [`Strategy::Portfolio`]. Same result convention as [`Search::dfs`].
+    fn portfolio(&mut self, g: &mut Game, alive: u128, first_budget: u64) -> Option<bool> {
+        let deciders: [&dyn MoveDecider; 2] = [self.opts.decider, &DECK_ORDER];
+        let mut budget = first_budget.max(1);
+        loop {
+            for &d in &deciders {
+                self.decider = d;
+                self.round_limit = Some(self.stats.nodes.saturating_add(budget));
+                self.line.clear();
+                let r = self.dfs(g, alive, 0);
+                if r.is_some() || self.stopped.is_some() {
+                    return r;
+                }
+            }
+            budget = budget.saturating_mul(2);
+        }
     }
 
     /// Best-first over positions between tricks. `None` if more than
@@ -1151,5 +1194,36 @@ tasks:
             }
         }
         assert!(seen.0 > 50 && seen.1 > 50, "{seen:?}");
+    }
+
+    #[test]
+    fn portfolio_agrees_with_depth_first() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(31);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let reference = solve_drafts(&s, &Options { strategy: Strategy::Dfs, ..Options::default() }).unwrap().0;
+            // A tiny first budget forces several restarts.
+            let opts = Options { strategy: Strategy::Portfolio { first_budget: 1 + case as u64 % 50 }, ..Options::default() };
+            let (v, owners, _) = solve_drafts(&s, &opts).unwrap();
+            match (&reference, &v) {
+                (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                    let mut d = s.clone();
+                    for (t, o) in d.tasks.iter_mut().zip(owners.unwrap()) {
+                        t.owner = o;
+                    }
+                    check_line(&d, line);
+                    feasible += 1;
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => infeasible += 1,
+                _ => panic!("case {case}: dfs {reference:?}, portfolio {v:?}"),
+            }
+        }
+        assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
     }
 }
