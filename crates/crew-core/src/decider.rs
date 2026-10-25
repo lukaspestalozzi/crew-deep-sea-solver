@@ -185,6 +185,38 @@ fn wish(w: &(crate::card::CardSet, crate::card::CardSet), c: Card) -> i32 {
     3 * w.0.contains(c) as i32 - 3 * w.1.contains(c) as i32
 }
 
+/// Playing `m` now: does it lead the trick, can it still be made to win
+/// (no later player is forced to beat it), can it still lose (some later
+/// player is able to beat it)? Later players must follow the led suit if
+/// they can; otherwise they may play anything. They cooperate.
+fn trick_outcome(g: &Game, m: Card) -> (bool, bool, bool) {
+    let mut cards = [Card::from_index(0); 6];
+    let n = g.current.len();
+    cards[..n].copy_from_slice(&g.current);
+    cards[n] = m;
+    if winning_position(&cards[..=n]) != n {
+        return (false, false, true);
+    }
+    let led = cards[0].suit();
+    let beats = |y: Card| {
+        if y.is_sub() {
+            !m.is_sub() || y.value() > m.value()
+        } else {
+            !m.is_sub() && y.suit() == m.suit() && y.value() > m.value()
+        }
+    };
+    let me = g.to_play();
+    let (mut forced, mut able) = (false, false);
+    for k in 1..g.n - n {
+        let q = (me + k) % g.n;
+        let follow = g.hands[q].intersect(led.cards());
+        let playable = if follow.is_empty() { g.hands[q] } else { follow };
+        forced |= !playable.is_empty() && playable.iter().all(beats);
+        able |= playable.iter().any(beats);
+    }
+    (true, !forced, able)
+}
+
 impl MoveDecider for TaskAware {
     fn order(&self, pos: &Position, moves: &mut [Card]) {
         if moves.len() < 2 {
@@ -203,17 +235,22 @@ impl MoveDecider for TaskAware {
             (w, desire(pos, w))
         };
         let winner_wishes = if winner == me { my_wishes } else { card_wishes(pos, winner) };
-        let mut buf = [Card::from_index(0); 6];
         let n = g.current.len();
-        buf[..n].copy_from_slice(&g.current);
         let mut scored: [(i32, Card); 14] = [(0, Card::from_index(0)); 14];
         for (i, &m) in moves.iter().enumerate() {
-            buf[n] = m;
-            let wins = leading || winning_position(&buf[..=n]) == n;
-            let want = base + wish(&my_wishes, m) + if wins { fit_score(pos, me, m) } else { 0 };
-            let mut score = if wins { want * 10 } else { -want * 10 };
+            let (best_now, can_win, can_lose) = trick_outcome(g, m);
+            let want = base + wish(&my_wishes, m) + if can_win { fit_score(pos, me, m) } else { 0 };
+            // Wanting the trick: moves that can still win it first; wanting
+            // to lose it: moves that can still lose it first.
+            let mut score = if want >= 0 {
+                if can_win { want * 10 } else { -want * 10 }
+            } else if can_lose {
+                -want * 10
+            } else {
+                want * 10
+            };
             if !leading && winner != me {
-                if wins {
+                if best_now {
                     // Taking the trick from a winner who wants it, or who must lose it.
                     score -= winner_desire * 5;
                 } else {
@@ -225,7 +262,7 @@ impl MoveDecider for TaskAware {
             let tie = if self.salt == 0 {
                 // Win cheaply, lose expensively.
                 let v = m.value() as i32 + if m.is_sub() { 10 } else { 0 };
-                if wins { -v } else { v }
+                if can_win { -v } else { v }
             } else {
                 let h = (self.salt ^ (m.index() as u64) << 8 ^ (g.tricks.len() as u64) << 16 ^ (n as u64) << 24)
                     .wrapping_mul(0x9E37_79B9_7F4A_7C15);
