@@ -103,6 +103,9 @@ pub struct Options<'a> {
     pub cache_limit: usize,
     /// Stop with [`Verdict::Undecided`] after this many nodes.
     pub node_limit: Option<u64>,
+    /// In restarts, try the best line of earlier rounds first (the one with
+    /// the most tasks done, then the most tricks played, before it failed).
+    pub guide: bool,
     /// Hash the hands incrementally (Zobrist: card and holder) instead of by
     /// relative rank at each trick. Cheaper per position, but positions that
     /// differ only in which interchangeable cards are gone no longer share a key.
@@ -122,6 +125,7 @@ impl Default for Options<'_> {
             cache_limit: 4_000_000,
             node_limit: None,
             zobrist: false,
+            guide: false,
         }
     }
 }
@@ -651,6 +655,12 @@ struct Search<'o, 'a> {
     /// Reused buffers of the combined check.
     pairs_buf: Vec<(u128, Option<CountRule>, (u8, u8))>,
     settled_buf: Vec<(usize, Req)>,
+    /// Best line so far (most tasks done, then deepest) and its progress.
+    best_line: Vec<Card>,
+    best_progress: (u32, usize),
+    /// Line to try first in this restart, and how much of the current line follows it.
+    guide: Vec<Card>,
+    guide_match: usize,
 }
 
 impl<'o, 'a> Search<'o, 'a> {
@@ -678,6 +688,10 @@ impl<'o, 'a> Search<'o, 'a> {
             round_limit: None,
             pairs_buf: Vec::new(),
             settled_buf: Vec::new(),
+            best_line: Vec::new(),
+            best_progress: (0, 0),
+            guide: Vec::new(),
+            guide_match: 0,
         }
     }
 
@@ -975,6 +989,14 @@ impl Search<'_, '_> {
         }
         let pos = Position { game: g, kinds: &self.model.kinds, alive, done };
         self.decider.order(&pos, &mut buf[..k]);
+        let d = self.line.len();
+        if self.guide_match == d {
+            if let Some(&c) = self.guide.get(d) {
+                if let Some(i) = buf[..k].iter().position(|&x| x == c) {
+                    buf[..=i].rotate_right(1);
+                }
+            }
+        }
         k
     }
 
@@ -1061,13 +1083,26 @@ impl Search<'_, '_> {
                 Err(r) => return Some(r),
                 Ok((a, d, k)) => (alive, done, key) = (a, d, k),
             }
+            if self.opts.guide {
+                let tasks_done = (0..self.model.kinds.len()).filter(|&t| bits_of(done, t) != 0).count() as u32;
+                let progress = (tasks_done, self.line.len());
+                if progress > self.best_progress {
+                    self.best_progress = progress;
+                    self.best_line.clone_from(&self.line);
+                }
+            }
         }
         let mut buf = [Card::from_index(0); 14];
         let k = self.ordered_moves(g, alive, done, &mut buf);
+        let depth = self.line.len();
         for &card in &buf[..k] {
             self.play(g, card);
             self.line.push(card);
+            if self.guide_match == depth && self.guide.get(depth) == Some(&card) {
+                self.guide_match = depth + 1;
+            }
             let r = self.dfs(g, alive, done);
+            self.guide_match = self.guide_match.min(depth);
             if r != Some(false) {
                 if r.is_none() {
                     self.undo(g, card);
@@ -1094,6 +1129,10 @@ impl Search<'_, '_> {
             round += 1;
             for &d in &deciders {
                 self.decider = d;
+                if self.opts.guide {
+                    self.guide.clone_from(&self.best_line);
+                    self.guide_match = 0;
+                }
                 self.round_limit = Some(self.stats.nodes.saturating_add(budget));
                 self.line.clear();
                 let r = self.dfs(g, alive, 0);
@@ -1659,5 +1698,35 @@ Player1: {task}"
             assert_eq!(v, Verdict::Infeasible, "{task}");
             assert!(stats.nodes <= 2, "{task}: {} nodes", stats.nodes);
         }
+    }
+
+    #[test]
+    fn guided_restarts_agree_with_depth_first() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(77);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let reference = solve_drafts(&s, &Options { strategy: Strategy::Dfs, ..Options::default() }).unwrap().0;
+            let opts = Options { guide: true, strategy: Strategy::Portfolio { first_budget: 1 + case as u64 % 50 }, ..Options::default() };
+            let (v, owners, _) = solve_drafts(&s, &opts).unwrap();
+            match (&reference, &v) {
+                (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                    let mut d = s.clone();
+                    for (t, o) in d.tasks.iter_mut().zip(owners.unwrap()) {
+                        t.owner = o;
+                    }
+                    check_line(&d, line);
+                    feasible += 1;
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => infeasible += 1,
+                _ => panic!("case {case}: dfs {reference:?}, guided {v:?}"),
+            }
+        }
+        assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
     }
 }
