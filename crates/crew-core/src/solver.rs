@@ -11,7 +11,7 @@
 //! orders the moves, and the [`Strategy`] (depth-first or best-first).
 
 use crate::card::{Card, CardSet, Suit};
-use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE};
+use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE, TASK_AWARE_RANDOM};
 use crate::game::{Game, MAX_PLAYERS};
 use crate::situation::{Owner, Situation};
 use crate::task::{any_final_counts, merge, req_bounds, top_subs_count, Boundaries, CountRule, Kind, Req, Status, NO_BOUNDARIES};
@@ -76,11 +76,12 @@ pub enum Strategy {
     /// first. Keeps every open position in memory; falls back to depth-first
     /// once more than `max_positions` positions were generated.
     BestFirst { max_positions: usize },
-    /// Depth-first restarts that alternate the options' decider with the deck
-    /// order, with node budgets doubling from `first_budget`. The cache of
-    /// lost positions is kept across restarts (it does not depend on the move
-    /// order). Search times vary a lot with the move order; this costs about
-    /// two to three times the better of the two.
+    /// Depth-first restarts that cycle through the options' decider, the
+    /// deck order and the task-aware order with random tie-breaks (a new
+    /// salt each round), with node budgets doubling from `first_budget`. The
+    /// cache of lost positions is kept across restarts (it does not depend on
+    /// the move order). Search times vary a lot with the move order; this
+    /// costs a small multiple of the best of them.
     Portfolio { first_budget: u64 },
 }
 
@@ -1085,9 +1086,12 @@ impl Search<'_, '_> {
     /// Restarts alternating move orders with doubling budgets; see
     /// [`Strategy::Portfolio`]. Same result convention as [`Search::dfs`].
     fn portfolio(&mut self, g: &mut Game, alive: u128, first_budget: u64) -> Option<bool> {
-        let deciders: [&dyn MoveDecider; 2] = [self.opts.decider, &DECK_ORDER];
         let mut budget = first_budget.max(1);
+        let mut round = 0;
         loop {
+            let deciders: [&dyn MoveDecider; 3] =
+                [self.opts.decider, &DECK_ORDER, &TASK_AWARE_RANDOM[round % TASK_AWARE_RANDOM.len()]];
+            round += 1;
             for &d in &deciders {
                 self.decider = d;
                 self.round_limit = Some(self.stats.nodes.saturating_add(budget));
