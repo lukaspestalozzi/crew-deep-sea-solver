@@ -87,29 +87,38 @@ fn desire(pos: &Position, p: usize) -> i32 {
     d
 }
 
-/// Extra wish of player `p` for card `c` landing in its trick: positive if a
-/// task of `p` needs `c`, negative if it must not win `c`.
-fn wants_card(pos: &Position, p: usize, c: Card) -> i32 {
-    let mut d = 0;
+/// Cards player `p` needs to win (open "win these cards" tasks) and cards it
+/// must not win (open "win none of" tasks).
+fn card_wishes(pos: &Position, p: usize) -> (crate::card::CardSet, crate::card::CardSet) {
+    let (mut need, mut avoid) = (crate::card::CardSet::EMPTY, crate::card::CardSet::EMPTY);
     for (t, k) in pos.kinds.iter().enumerate() {
         if pos.open_owners(t) & (1 << p) == 0 {
             continue;
         }
         match k {
-            Kind::WinCards(s) if s.contains(c) => d += 3,
-            Kind::WinNone(s) if s.contains(c) => d -= 3,
+            Kind::WinCards(s) => need = need.union(*s),
+            Kind::WinNone(s) => avoid = avoid.union(*s),
             _ => {}
         }
     }
-    d
+    (need, avoid)
+}
+
+/// +3 if `c` is a card the player needs, -3 if one it must not win.
+fn wish(w: &(crate::card::CardSet, crate::card::CardSet), c: Card) -> i32 {
+    3 * w.0.contains(c) as i32 - 3 * w.1.contains(c) as i32
 }
 
 impl MoveDecider for TaskAware {
     fn order(&self, pos: &Position, moves: &mut [Card]) {
+        if moves.len() < 2 {
+            return;
+        }
         let g = pos.game;
         let me = g.to_play();
         let leading = g.current.is_empty();
         let base = desire(pos, me);
+        let my_wishes = card_wishes(pos, me);
         // Current winner of the trick and how much it wants the trick.
         let (winner, winner_desire) = if leading {
             (me, 0)
@@ -117,6 +126,7 @@ impl MoveDecider for TaskAware {
             let w = (g.leader as usize + winning_position(&g.current)) % g.n;
             (w, desire(pos, w))
         };
+        let winner_wishes = if winner == me { my_wishes } else { card_wishes(pos, winner) };
         let mut buf = [Card::from_index(0); 6];
         let n = g.current.len();
         buf[..n].copy_from_slice(&g.current);
@@ -124,7 +134,7 @@ impl MoveDecider for TaskAware {
         for (i, &m) in moves.iter().enumerate() {
             buf[n] = m;
             let wins = leading || winning_position(&buf[..=n]) == n;
-            let want = base + wants_card(pos, me, m);
+            let want = base + wish(&my_wishes, m);
             let mut score = if wins { want * 10 } else { -want * 10 };
             if !leading && winner != me {
                 if wins {
@@ -132,7 +142,7 @@ impl MoveDecider for TaskAware {
                     score -= winner_desire * 5;
                 } else {
                     // Feeding the winner a card it needs (or must not get).
-                    score += wants_card(pos, winner, m) * 5;
+                    score += wish(&winner_wishes, m) * 5;
                 }
             }
             // Tie-breaks: win cheaply, lose expensively.

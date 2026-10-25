@@ -17,6 +17,7 @@ use crate::situation::{Owner, Situation};
 use crate::task::{any_final_counts, merge, top_subs_count, Boundaries, Kind, Status, NO_BOUNDARIES};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +89,10 @@ pub struct Options<'a> {
     pub cache_limit: usize,
     /// Stop with [`Verdict::Undecided`] after this many nodes.
     pub node_limit: Option<u64>,
+    /// Hash the hands incrementally (Zobrist: card and holder) instead of by
+    /// relative rank at each trick. Cheaper per position, but positions that
+    /// differ only in which interchangeable cards are gone no longer share a key.
+    pub zobrist: bool,
 }
 
 impl Default for Options<'_> {
@@ -102,6 +107,7 @@ impl Default for Options<'_> {
             strategy: Strategy::Dfs,
             cache_limit: 4_000_000,
             node_limit: None,
+            zobrist: false,
         }
     }
 }
@@ -204,13 +210,14 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
         opts,
         boundaries,
         has_count_rules,
-        count_memo: HashMap::new(),
-        draft_memo: HashMap::new(),
-        failed: HashSet::new(),
+        count_memo: HashMap::default(),
+        draft_memo: HashMap::default(),
+        failed: HashSet::default(),
         stats: Stats::default(),
         line: Vec::new(),
         won: 0,
         stopped: None,
+        zob: hands_zobrist(&g),
     };
     let alive = search.model.alive0;
     let result = match opts.strategy {
@@ -329,7 +336,7 @@ impl Model {
     }
 
     /// Is there a complete legal draft using only pairs in `mask`?
-    fn draft_in(&self, mask: u128, memo: &mut HashMap<u128, bool>) -> bool {
+    fn draft_in(&self, mask: u128, memo: &mut HashMap<u128, bool, Fast>) -> bool {
         let Some(caps) = self.caps else { return false };
         for (t, s) in self.slots.iter().enumerate() {
             if *s != Slot::Open && bits_of(mask, t) == 0 {
@@ -377,6 +384,57 @@ impl Model {
 
 // ---------------------------------------------------------------- search
 
+/// Zobrist hash of all hands.
+fn hands_zobrist(g: &Game) -> u128 {
+    let mut z = 0;
+    for p in 0..g.n {
+        for c in g.hands[p].iter() {
+            z ^= zobrist(c, p);
+        }
+    }
+    z
+}
+
+/// Random 128-bit code for "card `c` is in the hand of player `p`".
+fn zobrist(c: Card, p: usize) -> u128 {
+    static TABLE: std::sync::OnceLock<[[u128; MAX_PLAYERS]; 40]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut rng = crate::rng::Rng::new(0x2B7E_1516_28AE_D2A6);
+        let mut t = [[0u128; MAX_PLAYERS]; 40];
+        for row in t.iter_mut() {
+            for v in row.iter_mut() {
+                *v = (rng.next_u64() as u128) << 64 | rng.next_u64() as u128;
+            }
+        }
+        t
+    })[c.index() as usize][p]
+}
+
+/// A cheap multiply-rotate hasher for the search tables: their keys are
+/// already hashes or small bit masks, so the default SipHash is wasted work.
+#[derive(Default)]
+struct FastHasher(u64);
+
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(29) ^ x).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn write_u128(&mut self, x: u128) {
+        self.write_u64(x as u64);
+        self.write_u64((x >> 64) as u64);
+    }
+}
+
+type Fast = BuildHasherDefault<FastHasher>;
+
 /// Two independent 64-bit multiply-rotate hashes; a collision of both is
 /// negligible (about 2^-128 per pair).
 struct KeyHasher(u64, u64);
@@ -400,15 +458,17 @@ struct Search<'o, 'a> {
     /// Where tasks tell cards of a suit apart.
     boundaries: Boundaries,
     has_count_rules: bool,
-    count_memo: HashMap<(u64, u128), bool>,
-    draft_memo: HashMap<u128, bool>,
-    failed: HashSet<u128>,
+    count_memo: HashMap<(u64, u128), bool, Fast>,
+    draft_memo: HashMap<u128, bool, Fast>,
+    failed: HashSet<u128, Fast>,
     stats: Stats,
     line: Vec<Card>,
     /// Done pairs of the winning position.
     won: u128,
     /// Why the search stopped early (cancel or node limit).
     stopped: Option<Verdict>,
+    /// Zobrist hash of (card, holder) over all cards in hand.
+    zob: u128,
 }
 
 impl Search<'_, '_> {
@@ -496,6 +556,19 @@ impl Search<'_, '_> {
     /// identically, so they share a key.
     fn key(&self, g: &Game, alive: u128, done: u128) -> u128 {
         let mut h = KeyHasher::new();
+        if self.opts.zobrist {
+            h.push(self.zob as u64);
+            h.push((self.zob >> 64) as u64);
+        } else {
+            self.push_hands(g, &mut h);
+        }
+        self.push_rest(g, alive, done, &mut h);
+        h.finish()
+    }
+
+    /// The hands by relative rank: per suit, the holders of the remaining
+    /// cards from high to low with their class.
+    fn push_hands(&self, g: &Game, h: &mut KeyHasher) {
         let mut owner = [0u8; 40];
         for p in 0..g.n {
             for c in g.hands[p].iter() {
@@ -517,6 +590,9 @@ impl Search<'_, '_> {
             }
             h.push(w);
         }
+    }
+
+    fn push_rest(&self, g: &Game, alive: u128, done: u128, h: &mut KeyHasher) {
         h.push(g.leader as u64);
         h.push(alive as u64);
         h.push((alive >> 64) as u64);
@@ -531,7 +607,17 @@ impl Search<'_, '_> {
                 }
             }
         }
-        h.finish()
+    }
+
+    fn play(&mut self, g: &mut Game, card: Card) -> bool {
+        self.zob ^= zobrist(card, g.to_play());
+        g.play(card)
+    }
+
+    /// Undo `card`, the last card played; afterwards its player is to play again.
+    fn undo(&mut self, g: &mut Game, card: Card) {
+        g.undo();
+        self.zob ^= zobrist(card, g.to_play());
     }
 
     /// Legal moves with interchangeable cards collapsed to one representative.
@@ -649,17 +735,17 @@ impl Search<'_, '_> {
         let mut buf = [Card::from_index(0); 14];
         let k = self.ordered_moves(g, alive, done, &mut buf);
         for &card in &buf[..k] {
-            g.play(card);
+            self.play(g, card);
             self.line.push(card);
             let r = self.dfs(g, alive, done);
             if r != Some(false) {
                 if r.is_none() {
-                    g.undo();
+                    self.undo(g, card);
                 }
                 return r;
             }
             self.line.pop();
-            g.undo();
+            self.undo(g, card);
         }
         if let Some(k) = key {
             self.remember_lost(k);
@@ -678,7 +764,7 @@ impl Search<'_, '_> {
         let mut nodes = vec![Node { parent: usize::MAX, cards: Vec::new() }];
         let mut states: Vec<Option<(Game, u128, u128)>> = vec![None];
         let mut heap = BinaryHeap::new();
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<u128, Fast> = HashSet::default();
         let line_to = |nodes: &Vec<Node>, mut i: usize, last: &[Card]| {
             let mut parts = vec![last.to_vec()];
             while i != usize::MAX {
@@ -699,6 +785,7 @@ impl Search<'_, '_> {
         heap.push((0u32, 0usize));
         while let Some((_, i)) = heap.pop() {
             let (mut g, a, d) = states[i].take().unwrap();
+            self.zob = hands_zobrist(&g);
             // Every way to finish the trick in progress, depth-first.
             let mut children: Vec<(Vec<Card>, Game, u128, u128)> = Vec::new();
             let mut path = Vec::new();
@@ -712,6 +799,9 @@ impl Search<'_, '_> {
                 return Some(Some(true));
             }
             for (cards, child, ca, cd) in children {
+                if self.opts.zobrist {
+                    self.zob = hands_zobrist(&child);
+                }
                 let key = self.key(&child, ca, cd);
                 if !seen.insert(key) || self.failed.contains(&key) {
                     continue;
@@ -746,7 +836,7 @@ impl Search<'_, '_> {
             if !self.tick() {
                 return false;
             }
-            let trick_done = g.play(card);
+            let trick_done = self.play(g, card);
             path.push(card);
             if trick_done {
                 match self.boundary(g, alive, done) {
@@ -758,11 +848,11 @@ impl Search<'_, '_> {
                 }
             } else if !self.expand(g, alive, done, path, out, found) {
                 path.pop();
-                g.undo();
+                self.undo(g, card);
                 return false;
             }
             path.pop();
-            g.undo();
+            self.undo(g, card);
             if found.is_some() {
                 return true;
             }
@@ -1029,5 +1119,37 @@ tasks:
         let (v, stats) = solve(&s, &opts).unwrap();
         assert_eq!(v, Verdict::Undecided, "{stats:?}");
         assert!(stats.nodes < 20_000);
+    }
+
+    #[test]
+    fn zobrist_keys_agree_with_rank_keys() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(23);
+        let mut seen = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let reference = solve_drafts(&s, &Options::default()).unwrap().0;
+            for strategy in [Strategy::Dfs, Strategy::BestFirst { max_positions: 200 }] {
+                let opts = Options { zobrist: true, strategy, ..Options::default() };
+                let (v, owners, _) = solve_drafts(&s, &opts).unwrap();
+                match (&reference, &v) {
+                    (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                        let mut d = s.clone();
+                        for (t, o) in d.tasks.iter_mut().zip(owners.unwrap()) {
+                            t.owner = o;
+                        }
+                        check_line(&d, line);
+                        seen.0 += 1;
+                    }
+                    (Verdict::Infeasible, Verdict::Infeasible) => seen.1 += 1,
+                    _ => panic!("case {case} {strategy:?}: rank keys {reference:?}, zobrist {v:?}"),
+                }
+            }
+        }
+        assert!(seen.0 > 50 && seen.1 > 50, "{seen:?}");
     }
 }

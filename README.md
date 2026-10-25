@@ -34,9 +34,32 @@ cargo run --release -p crew-cli -- solve examples/mock.crew --analyse --all-draf
 cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
-- `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts (sampled above `--limit`, default 2000; the yes/no answer stays exact).
+- `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
+- `--count-drafts`: also count the drafts that work, each on its own (sampled above `--limit`, default 2000; a draft that hits the node limit counts as undecided).
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
-- `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times.
+- `--best-first`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
+- `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file.
+
+## Search
+
+`crates/crew-core/src/solver.rs` runs over plays. Between tricks every task is
+evaluated for every player who may still own it (a (task, player) *pair*).
+With fixed owners each task has one pair; with owner `?` one search covers
+all legal drafts: a branch is lost once no complete legal draft of surviving
+pairs remains, and won once some draft has all its tasks done.
+
+- Pruning: a task fails as soon as it can no longer be met; all trick-count
+  rules (exact counts, vs. captain, most/fewest, …) are checked jointly over
+  the possible final splits and drafts; certain submarine wins are counted.
+- Positions proven lost are cached (128-bit keys; by default the hands by
+  relative rank, so positions differing only in interchangeable cards share
+  a key). The cache has a size limit.
+- Interchangeable cards are tried once.
+- Pluggable through `Options`: a `MoveDecider` (`decider.rs`: `TaskAware` by
+  default, `DeckOrder` as reference) orders the moves, and the same trait can
+  drive a self-playing bot; the `Strategy` is depth-first (default) or
+  best-first over positions between tricks (falls back to depth-first above
+  a position budget). A node limit makes a search stop as undecided.
 
 ## Text format (`crew 1`)
 
@@ -123,7 +146,8 @@ entry (`note`) and in `crates/crew-core/src/task.rs`.
 
 `cargo test --release` runs, among others:
 
-- a differential test: the optimised search (position cache, merged equivalent cards, joint trick-count check) against a plain search on 400 random positions;
+- a differential test: the optimised search (position cache, merged equivalent cards, joint trick-count check, task-aware move order) against a plain search on 400 random positions;
+- the search over all drafts in one tree against solving each draft on its own; best-first and Zobrist keys against the defaults;
 - a soundness test: every early "done" or "failed" verdict of every task checked against all (or sampled) endings of the game.
 
 ## Legal

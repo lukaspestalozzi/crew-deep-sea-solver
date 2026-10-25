@@ -29,20 +29,20 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--best-first] [--deck-order]
+  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--best-first] [--deck-order] [--zobrist]
                                  solve every situation in a .crew file; tasks with
                                  owner ? are searched over all legal drafts at once;
                                  --count-drafts also counts the drafts that work (sampled
                                  above N drafts); --all-drafts also checks other drafts;
                                  --analyse adds critical decisions, smallest conflict
-                                 and point of no return; --best-first and --deck-order
-                                 switch the search strategy and the move order
+                                 and point of no return; --best-first, --deck-order and
+                                 --zobrist switch strategy, move order and position hashing
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
                                  random deals, tasks drawn to the target sum, random legal draft
   crew bench --load FILE [--timeout SECS] [-v]
                                  the same timing over the situations in FILE; with owner ?
                                  the verdict over all drafts is timed
-                                 (bench also takes --best-first, --deck-order, --no-cache)";
+                                 (bench also takes --best-first, --deck-order, --zobrist, --no-cache)";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -103,6 +103,9 @@ fn search_options(args: &[String]) -> Options<'static> {
     }
     if args.iter().any(|a| a == "--deck-order") {
         o.decider = &crew_core::decider::DECK_ORDER;
+    }
+    if args.iter().any(|a| a == "--zobrist") {
+        o.zobrist = true;
     }
     if args.iter().any(|a| a == "--best-first") {
         o.strategy = solver::Strategy::BestFirst { max_positions: 2_000_000 };
