@@ -19,7 +19,7 @@ self.onmessage = async (e: MessageEvent<Call>) => {
         out = w.solve_drafts(args[0] as string, progress);
         break;
       case 'drafts':
-        out = w.drafts(args[0] as string, args[1] as boolean, args[2] as number, progress);
+        out = w.drafts(args[0] as string, args[1] as boolean, args[2] as number, args[3] as number, args[4] as number, progress);
         break;
       case 'conflict':
         out = w.conflict(args[0] as string);
@@ -31,7 +31,7 @@ self.onmessage = async (e: MessageEvent<Call>) => {
         out = w.tightness(args[0] as string, args[1] as string);
         break;
       case 'deal_robustness':
-        out = w.deal_robustness(args[0] as string, args[1] as number, args[2] as number, progress);
+        out = w.deal_robustness(args[0] as string, args[1] as number, args[2] as number, args[3] as number, args[4] as number, progress);
         break;
       default:
         out = JSON.stringify({ error: { msg: `unknown function ${fn}` } });

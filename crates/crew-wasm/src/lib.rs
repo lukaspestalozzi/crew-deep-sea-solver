@@ -165,6 +165,12 @@ fn named_cards(kind: &Kind) -> Vec<Card> {
     }
 }
 
+/// Cache size per worker when `parts` workers run at once: the default split
+/// between them (at least 500 000 positions), so memory stays bounded.
+fn cache_share(parts: u32) -> usize {
+    (Options::default().cache_limit / parts.max(1) as usize).max(500_000)
+}
+
 fn progress_fn(f: &JsValue) -> Option<js_sys::Function> {
     f.dyn_ref::<js_sys::Function>().cloned()
 }
@@ -333,7 +339,7 @@ pub fn solve_drafts_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
 /// smallest fix; this asks whether another draft would have worked, so it
 /// starts from the deal and ignores played tricks.
 #[wasm_bindgen]
-pub fn drafts(text: &str, all_drafts: bool, limit: u32, progress: JsValue) -> String {
+pub fn drafts(text: &str, all_drafts: bool, limit: u32, part: u32, parts: u32, progress: JsValue) -> String {
     let cb = progress_fn(&progress);
     // Called with (checked, planned, working so far, drafts still open).
     let report = |checked: u64, planned: u64, working: u64, open: u64| {
@@ -347,10 +353,16 @@ pub fn drafts(text: &str, all_drafts: bool, limit: u32, progress: JsValue) -> St
             let _ = f.apply(&JsValue::NULL, &args);
         }
     };
-    drafts_impl(text, all_drafts, limit, Some(&report))
+    drafts_impl(text, all_drafts, limit, (part as usize, parts as usize), Some(&report))
 }
 
-pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&dyn Fn(u64, u64, u64, u64)>) -> String {
+pub fn drafts_impl(
+    text: &str,
+    all_drafts: bool,
+    limit: u32,
+    part: (usize, usize),
+    progress: Option<&dyn Fn(u64, u64, u64, u64)>,
+) -> String {
     let mut s = match situation(text) {
         Ok(s) => s,
         Err(e) => return err(e),
@@ -363,7 +375,14 @@ pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&d
             a.owner = Owner::Unknown;
         }
     }
-    let opts = DraftOptions { limit: limit as u64, reference, progress, ..DraftOptions::default() };
+    let opts = DraftOptions {
+        limit: limit as u64,
+        reference,
+        progress,
+        part,
+        cache_limit: cache_share(part.1 as u32),
+        ..DraftOptions::default()
+    };
     match analysis::draft_search(&s, &opts) {
         Err(e) => err(e),
         Ok(r) => {
@@ -454,7 +473,7 @@ pub fn tightness(text: &str, line_json: &str) -> String {
 
 /// Share of random deals on which the situation's task cards can be fulfilled.
 #[wasm_bindgen]
-pub fn deal_robustness(text: &str, deals: u32, seed: u32, progress: JsValue) -> String {
+pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32, progress: JsValue) -> String {
     let cb = progress_fn(&progress);
     let report = |done: usize, total: usize| {
         if let Some(f) = &cb {
@@ -465,7 +484,16 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, progress: JsValue) -> 
         Err(e) => err(e),
         Ok(s) => {
             let cards: Vec<_> = s.tasks.iter().filter(|a| !a.card.is_rule()).map(|a| a.card).collect();
-            match analysis::deal_robustness(&cards, s.players(), deals as usize, Some(2_000_000), true, seed as u64, None, Some(&report)) {
+            match analysis::deal_robustness(
+                &cards,
+                s.players(),
+                deals as usize,
+                true,
+                seed as u64,
+                (part as usize, parts as usize),
+                &Options { node_limit: Some(2_000_000), cache_limit: cache_share(parts), ..Options::default() },
+                Some(&report),
+            ) {
                 Some((good, undecided, total)) => ok(json!({ "solvable": good, "undecided": undecided, "deals": total })),
                 None => ok(Value::Null),
             }
@@ -546,7 +574,7 @@ Player2: win B4
         let r: Value = serde_json::from_str(&solve_impl(&fixed, None)).unwrap();
         assert_eq!(r["ok"]["verdict"], "feasible");
         assert!(r["ok"]["tricks"].as_array().unwrap().len() >= 1);
-        let d: Value = serde_json::from_str(&drafts_impl(TEXT, false, 2000, None)).unwrap();
+        let d: Value = serde_json::from_str(&drafts_impl(TEXT, false, 2000, (0, 1), None)).unwrap();
         assert_eq!(d["ok"]["any_works"], true);
         assert!(d["ok"]["total"].as_u64().unwrap() > 0);
         let bad: Value = serde_json::from_str(&parse("crew 2")).unwrap();

@@ -38,6 +38,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D18 | Search architecture | One search over all drafts (pairs of task and possible owner); pluggable move decider (also for the bot) and strategy; default: restarts alternating task-aware and deck order; best-first and Zobrist hashing kept as options; verdict first, draft count / critical decisions / other drafts on demand; per-draft and per-deal node limits report "undecided"; "Test 100 deals" asks "does some draft work" per deal | Q asked for speed and a generic search (A*); A* pushed back on (no path cost), best-first measured instead (2026-10-25) |
 | D19 | Early failure detection, exact counts | Combined checks (trick windows from card requirements, card destiny, submarine pairing, missing requirements and rule fixes), task-aware ordering for more task kinds with random tie-break restarts; the draft count and "Test 100 deals" are exact, "undecided" only when cancelled | Q asked for clear answers instead of "undecided" (2026-10-25) |
 | D20 | Move order | Lookahead for leads (play the trick out) on top of a task-aware order that knows when later players are forced to beat a card; measured on 180 missions: feasible ones about 40% faster, impossibility proofs slightly slower, hard tail unchanged; remembering the best line across restarts and a fourth restart order were measured worse and dropped | Q's choice after the study (2026-10-25) |
+| D21 | Several cores in the browser | The draft count (also "check all other drafts") and "Test 100 deals" split their drafts or deals round-robin over one worker per core (cores − 1, at most 8); each worker searches its share with its own cache (4M positions split between them, at least 500k each) and the page sums the results; the verdict itself stays on one worker | Asked by Q (2026-10-25) |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -280,7 +281,7 @@ All twelve open questions were settled in an interview on 2026-10-24, plus three
 
 - **Search time with 5 players:** up to 113,400 drafts. Mitigation: prune impossible task/player pairs first, cache, sample the counts (Q8).
 - **Exact verdicts can take long** on hard cases (Q7). Mitigation: progress, cancel, and the CLI for very long runs.
-- **Browser speed:** WebAssembly is slower than native and single-threaded unless split across workers. Mitigation: benchmark early with the CLI on the same code.
+- **Browser speed:** WebAssembly is slower than native and single-threaded unless split across workers. Mitigation: benchmark early with the CLI on the same code; counts are split across workers (D21).
 - **Card data:** until the photos are transcribed, the fan list with its known errors is used and flagged.
 - **Copyright:** verbatim card texts on a public site (Q10b). Accepted by Q; if KOSMOS objects, switch to own wording.
 - **Bot effort:** the hidden-hand bot is the largest single piece of work; planned, built after v1.

@@ -25,7 +25,7 @@ including what is not implemented yet.
 | `crates/crew-core/data/tasks.toml` | The 96 task cards and 5 logbook rule cards as data |
 | `crates/crew-cli` | `crew` command line |
 | `crates/crew-wasm` | WebAssembly bindings (JSON API) |
-| `web` | Installable web app (Svelte), runs the solver in a Web Worker, works offline |
+| `web` | Installable web app (Svelte), runs the solver in Web Workers (the draft count and "Test 100 deals" split over one worker per core), works offline |
 
 ## Command line
 

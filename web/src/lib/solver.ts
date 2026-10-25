@@ -57,6 +57,50 @@ export class SolverClient {
   }
 }
 
+/** Workers for counting: one per core, keeping one core for the page. */
+export const CORES = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2) - 1));
+
+/**
+ * Several workers splitting one count. Worker k of n gets the arguments plus
+ * (k, n) and decides its share; progress values are summed over the workers.
+ * Workers start on first use.
+ */
+export class SolverPool {
+  private clients: SolverClient[] = [];
+
+  all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T[]> {
+    while (this.clients.length < CORES) this.clients.push(new SolverClient());
+    const n = this.clients.length;
+    const last: number[][] = Array.from({ length: n }, () => []);
+    const report = (k: number, p: number[]) => {
+      last[k] = p;
+      progress?.(...p.map((_, i) => last.reduce((s, q) => s + (q[i] ?? 0), 0)));
+    };
+    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p))));
+  }
+
+  cancel() {
+    for (const c of this.clients) c.cancel();
+  }
+}
+
+/** One draft count from the parts of a [`SolverPool`]. */
+export function mergeDrafts(parts: DraftsOut[]): DraftsOut {
+  const sum = (f: (d: DraftsOut) => number) => parts.reduce((s, d) => s + f(d), 0);
+  const closest = parts
+    .map((d) => d.closest)
+    .filter((c): c is DraftLine => c !== null)
+    .sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0))[0];
+  return {
+    ...parts[0],
+    checked: sum((d) => d.checked),
+    working: sum((d) => d.working),
+    undecided: sum((d) => d.undecided),
+    example: parts.find((d) => d.example)?.example ?? null,
+    closest: closest ?? null,
+  };
+}
+
 // ---- result shapes ----
 
 export interface TrickOut {

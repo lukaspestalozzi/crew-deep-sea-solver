@@ -7,7 +7,7 @@
   import Card from './Card.svelte';
   import { winningPosition } from '../lib/cards';
   import { i18n } from '../lib/i18n.svelte';
-  import { Cancelled, SolverClient, type DraftsOut, type NoReturnOut, type SolveDraftsOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
+  import { Cancelled, SolverClient, SolverPool, mergeDrafts, type DraftsOut, type NoReturnOut, type SolveDraftsOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
   import { isInferred, textOf } from '../lib/tasks';
   import { check, parse, toText, type Situation } from '../lib/wasm';
 
@@ -21,7 +21,14 @@
 
   const LIMIT = 2000;
   const client = new SolverClient();
-  onDestroy(() => client.cancel());
+  const pool = new SolverPool();
+  onDestroy(() => {
+    client.cancel();
+    pool.cancel();
+  });
+  /** Count drafts on all workers; parts: see [`SolverPool`]. */
+  const poolDrafts = async (all: boolean) =>
+    mergeDrafts(await pool.all<DraftsOut>('drafts', [text, all, LIMIT], draftProgressFn));
 
   let running = $state(false);
   let cancelled = $state(false);
@@ -75,6 +82,7 @@
 
   async function run(text: string) {
     client.cancel();
+    pool.cancel();
     running = true;
     cancelled = false;
     lastProgress = '';
@@ -108,7 +116,6 @@
       return;
     }
     const nodes = (k: number) => (progress = i18n.t('positions', { n: (k / 1e6).toFixed(0) + 'M' }));
-    const draftProgress = draftProgressFn;
     try {
       if (unknownOwners) {
         draftsOut = await client.call<SolveDraftsOut>('solve_drafts', [text], nodes);
@@ -119,7 +126,7 @@
           if (situation.played.length) noReturn = await client.call<NoReturnOut>('no_return', [text]);
         }
         if (checkAll && situation.tasks.some((t) => t.owner !== 'crew')) {
-          altDrafts = await client.call<DraftsOut>('drafts', [text, true, LIMIT], draftProgress);
+          altDrafts = await poolDrafts(true);
         }
       }
     } catch (e) {
@@ -138,6 +145,7 @@
 
   function cancel() {
     client.cancel();
+    pool.cancel();
     cancelled = true;
     running = false;
   }
@@ -166,8 +174,8 @@
   /** Count the drafts that work (owners ?), or check all other drafts (owners fixed). */
   const countDrafts = () =>
     extra(async () => {
-      if (unknownOwners) drafts = await client.call<DraftsOut>('drafts', [text, false, LIMIT], draftProgressFn);
-      else altDrafts = await client.call<DraftsOut>('drafts', [text, true, LIMIT], draftProgressFn);
+      if (unknownOwners) drafts = await poolDrafts(false);
+      else altDrafts = await poolDrafts(true);
     });
 
   /** Critical decisions and tightness along the shown line. */
@@ -189,10 +197,13 @@
     cancelled = false;
     lastProgress = '';
     try {
-      robustness = await client.call('deal_robustness', [text, 100, Math.floor(Math.random() * 1e9)], (a, b) => {
+      type Part = { solvable: number; undecided: number; deals: number };
+      const parts = await pool.all<Part>('deal_robustness', [text, 100, Math.floor(Math.random() * 1e9)], (a, b) => {
         robustProgress = i18n.t('dealsTested', { a, b });
         lastProgress = robustProgress;
       });
+      const sum = (f: (p: Part) => number) => parts.reduce((s, p) => s + f(p), 0);
+      robustness = { solvable: sum((p) => p.solvable), undecided: sum((p) => p.undecided), deals: sum((p) => p.deals) };
     } catch (e) {
       if (!(e instanceof Cancelled)) error = String(e instanceof Error ? e.message : e);
     }
@@ -200,7 +211,7 @@
   }
 
   function cancelDeals() {
-    client.cancel();
+    pool.cancel();
     robustRunning = false;
     cancelled = true;
   }

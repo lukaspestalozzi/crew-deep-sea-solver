@@ -44,6 +44,11 @@ pub struct DraftOptions<'a> {
     /// Called with (drafts decided, drafts planned, working so far, drafts
     /// still open) before each search.
     pub progress: Option<&'a dyn Fn(u64, u64, u64, u64)>,
+    /// (k, n): decide only every n-th draft starting at k, for running the
+    /// count in n parallel workers. Part 0 also answers "does any draft work?".
+    pub part: (usize, usize),
+    /// Lost positions kept per search (see [`Options::cache_limit`]).
+    pub cache_limit: usize,
 }
 
 impl Default for DraftOptions<'_> {
@@ -54,6 +59,8 @@ impl Default for DraftOptions<'_> {
             reference: None,
             cancel: None,
             progress: None,
+            part: (0, 1),
+            cache_limit: Options::default().cache_limit,
         }
     }
 }
@@ -68,12 +75,17 @@ fn distance(a: &[Owner], b: &[Owner]) -> usize {
 pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     let (n, captain) = (g.n, g.captain as usize);
-    let solve_opts = Options { cancel: opts.cancel, ..Options::default() };
+    let solve_opts = Options { cancel: opts.cancel, cache_limit: opts.cache_limit, ..Options::default() };
 
-    let (any_works, one_tree_example) = match solver::solve_drafts(s, &Options { cancel: opts.cancel, ..Options::default() })? {
-        (Verdict::Feasible(line), Some(owners), _) => (Some(true), Some((owners, line))),
-        (Verdict::Infeasible | Verdict::Redeal(_), _, _) => (Some(false), None),
-        _ => (None, None),
+    let (part, parts) = (opts.part.0, opts.part.1.max(1));
+    let (any_works, one_tree_example) = if part != 0 {
+        (None, None)
+    } else {
+        match solver::solve_drafts(s, &solve_opts)? {
+            (Verdict::Feasible(line), Some(owners), _) => (Some(true), Some((owners, line))),
+            (Verdict::Infeasible | Verdict::Redeal(_), _, _) => (Some(false), None),
+            _ => (None, None),
+        }
     };
 
     // Rule out (task, player) pairs that are impossible even alone.
@@ -111,7 +123,6 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
     };
 
     // The drafts to decide: all of them, or a sample.
-    let planned = total.min(opts.limit);
     let mut drafts: Vec<Vec<Owner>> = Vec::new();
     if total <= opts.limit {
         draft::for_each_draft(&s.tasks, n, captain, |owners| {
@@ -131,6 +142,9 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
             }
         }
     }
+    // This worker's share.
+    let drafts: Vec<Vec<Owner>> = drafts.into_iter().enumerate().filter(|(i, _)| i % parts == part).map(|(_, d)| d).collect();
+    let planned = drafts.len() as u64;
     // Drafts with a pair impossible on its own fail without a search.
     let bad = |owners: &[Owner]| {
         owners.iter().enumerate().any(|(i, o)| matches!(o, Owner::Player(p) if s.tasks[i].owner == Owner::Unknown && !allowed(i, *p as usize)))
@@ -337,35 +351,46 @@ pub fn tightness(s: &Situation, line: &[Card], cancel: Option<&AtomicBool>) -> R
 
 /// Share of random deals on which these tasks can be fulfilled with some
 /// legal draft (one search over all drafts per deal). A first pass gives each
-/// deal up to `node_limit` nodes; with `settle`, the deals left open are then
-/// searched to the end. Progress: (deals done, deals). Returns (solvable,
-/// still open, deals); `None` if cancelled in the first pass.
+/// deal up to `opts.node_limit` nodes; with `settle`, the deals left open are
+/// then searched to the end. `part` (k, n): only every n-th deal from k, for
+/// parallel workers. Progress: (deals done, deals of this part). Returns
+/// (solvable, still open, deals of this part); `None` if cancelled in the
+/// first pass.
 #[allow(clippy::too_many_arguments)]
 pub fn deal_robustness(
     cards: &[&'static crate::catalogue::TaskCard],
     players: usize,
     deals: usize,
-    node_limit: Option<u64>,
     settle: bool,
     seed: u64,
-    cancel: Option<&AtomicBool>,
+    part: (usize, usize),
+    opts: &Options,
     progress: Option<&dyn Fn(usize, usize)>,
 ) -> Option<(usize, usize, usize)> {
     use crate::game::Game;
     use crate::situation::Assignment;
     let mut rng = Rng::new(seed);
+    let (part, parts) = (part.0, part.1.max(1));
+    let mine = (0..deals).filter(|d| d % parts == part).count();
     let mut ok = 0;
     let mut open = Vec::new();
+    let mut done = 0;
     for d in 0..deals {
-        if let Some(f) = progress {
-            f(d.saturating_sub(open.len()), deals);
+        // Every part draws all deals (same sequence) and solves its share.
+        let hands = Game::random_hands(players, &mut rng);
+        if d % parts != part {
+            continue;
         }
+        if let Some(f) = progress {
+            f(done, mine);
+        }
+        done += 1;
         let s = Situation {
-            hands: Game::random_hands(players, &mut rng),
+            hands,
             tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
             ..Situation::default()
         };
-        match solver::solve_drafts(&s, &Options { cancel, node_limit, ..Options::default() }) {
+        match solver::solve_drafts(&s, opts) {
             Ok((Verdict::Feasible(_), _, _)) => ok += 1,
             Ok((Verdict::Cancelled, _, _)) => return None,
             Ok((Verdict::Undecided, _, _)) => open.push(s),
@@ -375,9 +400,9 @@ pub fn deal_robustness(
     if settle {
         while let Some(s) = open.pop() {
             if let Some(f) = progress {
-                f(deals - open.len() - 1, deals);
+                f(mine - open.len() - 1, mine);
             }
-            match solver::solve_drafts(&s, &Options { cancel, ..Options::default() }) {
+            match solver::solve_drafts(&s, &Options { node_limit: None, ..opts.clone() }) {
                 Ok((Verdict::Feasible(_), _, _)) => ok += 1,
                 Ok((Verdict::Cancelled, _, _)) => {
                     open.push(s);
@@ -387,7 +412,7 @@ pub fn deal_robustness(
             }
         }
     }
-    Some((ok, open.len(), deals))
+    Some((ok, open.len(), mine))
 }
 
 #[cfg(test)]
@@ -503,10 +528,10 @@ tasks:
     #[test]
     fn deal_robustness_of_an_easy_and_an_impossible_set() {
         let easy = [crate::catalogue::find("first-trick").unwrap()];
-        assert_eq!(deal_robustness(&easy, 4, 10, None, true, 1, None, None), Some((10, 0, 10)));
+        assert_eq!(deal_robustness(&easy, 4, 10, true, 1, (0, 1), &Options::default(), None), Some((10, 0, 10)));
         let clash = [crate::catalogue::find("first-trick").unwrap(), crate::catalogue::find("first 2").unwrap()];
         // Same player may take both only with 2 tasks per seat; with 4 players each takes one.
-        assert_eq!(deal_robustness(&clash, 4, 5, None, true, 1, None, None), Some((0, 0, 5)));
+        assert_eq!(deal_robustness(&clash, 4, 5, true, 1, (0, 1), &Options::default(), None), Some((0, 0, 5)));
     }
 
     #[test]
@@ -533,5 +558,23 @@ tasks:
             true
         });
         assert_eq!((r.working, r.undecided, r.checked), (working, 0, r.total));
+    }
+
+    #[test]
+    fn parts_add_up_to_the_whole() {
+        let s = situation("?: win B4\n?: win P9 Y8\n?: first-trick\n?: tricks =2");
+        let whole = draft_search(&s, &DraftOptions::default()).unwrap();
+        let parts: Vec<DraftReport> =
+            (0..3).map(|k| draft_search(&s, &DraftOptions { part: (k, 3), ..Default::default() }).unwrap()).collect();
+        assert_eq!(parts.iter().map(|r| r.checked).sum::<u64>(), whole.checked);
+        assert_eq!(parts.iter().map(|r| r.working).sum::<u64>(), whole.working);
+        assert_eq!(parts[0].any_works, whole.any_works);
+        assert!(parts[1].any_works.is_none());
+
+        let cards = [crate::catalogue::find("win B4").unwrap(), crate::catalogue::find("first 2").unwrap()];
+        let all = deal_robustness(&cards, 4, 12, true, 5, (0, 1), &Options::default(), None).unwrap();
+        let split: Vec<_> = (0..3).map(|k| deal_robustness(&cards, 4, 12, true, 5, (k, 3), &Options::default(), None).unwrap()).collect();
+        assert_eq!(split.iter().map(|r| r.0).sum::<usize>(), all.0);
+        assert_eq!(split.iter().map(|r| r.2).sum::<usize>(), all.2);
     }
 }
