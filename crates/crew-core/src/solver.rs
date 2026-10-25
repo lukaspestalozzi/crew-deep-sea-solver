@@ -57,6 +57,13 @@ pub struct Stats {
     pub nodes: u64,
     pub cache_hits: u64,
     pub cache_size: usize,
+    /// Branches cut between tricks, by the number of tricks played then.
+    pub cut_at_trick: [u64; 14],
+    /// Branches cut by: a task's own evaluation, the combined count/window
+    /// check, the card destiny check, the cache of lost positions.
+    pub cut_by: [u64; 4],
+    /// How often each task (by index) was the one found failed.
+    pub failed_task: Vec<u64>,
 }
 
 /// How the search space is explored.
@@ -563,6 +570,10 @@ impl Search<'_, '_> {
                 }
             }
             if bits_of(alive, t) == 0 {
+                if self.stats.failed_task.len() <= t {
+                    self.stats.failed_task.resize(self.model.kinds.len(), 0);
+                }
+                self.stats.failed_task[t] += 1;
                 return (alive, done, Status::Failed);
             }
         }
@@ -663,6 +674,7 @@ impl Search<'_, '_> {
             }
         }
         if !destiny_ok(g, settled) {
+            self.stats.cut_by[2] += 1;
             return false;
         }
         let usable = *usable;
@@ -846,22 +858,36 @@ impl Search<'_, '_> {
     /// ends this branch; `Ok` gives the updated pairs and the cache key.
     fn boundary(&mut self, g: &Game, alive: u128, done: u128) -> Result<(u128, u128, Option<u128>), bool> {
         let (alive, done, st) = self.evaluate(g, alive, done);
+        let played = g.tricks.len().min(13);
         match st {
-            Status::Failed => return Err(false),
+            Status::Failed => {
+                self.stats.cut_by[0] += 1;
+                self.stats.cut_at_trick[played] += 1;
+                return Err(false);
+            }
             Status::Done => {
                 self.won = done;
                 return Err(true);
             }
             Status::Open => {}
         }
-        if self.has_count_rules && !self.counts_possible(g, alive, done) {
-            return Err(false);
+        if self.has_count_rules {
+            let destiny_before = self.stats.cut_by[2];
+            if !self.counts_possible(g, alive, done) {
+                if self.stats.cut_by[2] == destiny_before {
+                    self.stats.cut_by[1] += 1;
+                }
+                self.stats.cut_at_trick[played] += 1;
+                return Err(false);
+            }
         }
         let mut key = None;
         if self.opts.use_cache {
             let k = self.key(g, alive, done);
             if self.failed.contains(&k) {
                 self.stats.cache_hits += 1;
+                self.stats.cut_by[3] += 1;
+                self.stats.cut_at_trick[played] += 1;
                 return Err(false);
             }
             key = Some(k);
