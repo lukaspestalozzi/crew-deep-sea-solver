@@ -36,7 +36,10 @@ const USAGE: &str = "usage:
                                  --analyse adds critical decisions, smallest conflict
                                  and point of no return
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
-                                 random deals, tasks drawn to the target sum, random legal draft";
+                                 random deals, tasks drawn to the target sum, random legal draft
+  crew bench --load FILE [--timeout SECS] [-v]
+                                 the same timing over the situations in FILE; with owner ?
+                                 the draft search (verdict over all drafts) is timed";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -48,8 +51,8 @@ fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result
     }
 }
 
-/// Solve with a wall-clock limit; the solver is cancelled when it runs out.
-fn solve_with_timeout(s: &Situation, secs: f64) -> (Result<(Verdict, solver::Stats), solver::SolveError>, f64) {
+/// Run `f` with a wall-clock limit; the cancel flag is set when it runs out.
+fn with_timeout<R>(secs: f64, f: impl FnOnce(&std::sync::atomic::AtomicBool) -> R) -> (R, f64) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -63,11 +66,35 @@ fn solve_with_timeout(s: &Situation, secs: f64) -> (Result<(Verdict, solver::Sta
                 cancel_ref.store(true, Ordering::Relaxed);
             }
         });
-        let r = solver::solve(s, &Options { cancel: Some(&cancel), ..Options::default() });
+        let r = f(&cancel);
         let _ = tx.send(());
         r
     });
     (result, start.elapsed().as_secs_f64())
+}
+
+/// Verdict label and node count (0 where the search does not count nodes).
+fn timed_verdict(s: &Situation, secs: f64) -> ((&'static str, u64), f64) {
+    if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
+        return with_timeout(secs, |cancel| {
+            let opts = DraftOptions { cancel: Some(cancel), ..DraftOptions::default() };
+            match analysis::draft_search(s, &opts) {
+                Ok(r) => match r.any_works {
+                    Some(true) => ("feasible", 0),
+                    Some(false) => ("infeasible", 0),
+                    None => ("timeout", 0),
+                },
+                Err(_) => ("error", 0),
+            }
+        });
+    }
+    with_timeout(secs, |cancel| match solver::solve(s, &Options { cancel: Some(cancel), ..Options::default() }) {
+        Ok((Verdict::Feasible(_), st)) => ("feasible", st.nodes),
+        Ok((Verdict::Infeasible, st)) => ("infeasible", st.nodes),
+        Ok((Verdict::Redeal(_), _)) => ("re-deal", 0),
+        Ok((Verdict::Cancelled, st)) => ("timeout", st.nodes),
+        Err(_) => ("error", 0),
+    })
 }
 
 fn cmd_bench(args: &[String]) -> Result<(), String> {
@@ -85,33 +112,45 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
     let save: Option<String> = args.iter().position(|a| a == "--save").and_then(|i| args.get(i + 1).cloned());
     let verbose = args.iter().any(|a| a == "-v");
 
+    let load: Option<String> = args.iter().position(|a| a == "--load").and_then(|i| args.get(i + 1).cloned());
+    let loaded = match &load {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+            Some(notation::parse_all(&text).map_err(|e| format!("{path}: {e}"))?)
+        }
+        None => None,
+    };
+    let count = loaded.as_ref().map_or(count, |l| l.len());
+
     let mut rng = Rng::new(seed);
     let mut saved = Vec::new();
     let mut rows: Vec<(&'static str, f64)> = Vec::new();
+    let (mut total_secs, mut total_nodes) = (0.0, 0u64);
     for i in 0..count {
-        let hands = Game::random_hands(players, &mut rng);
-        let captain = Game::new(&hands).unwrap().captain as usize;
-        let cards = draft::draw_tasks(catalogue(), players, target, &mut rng).ok_or("could not draw tasks")?;
-        let mut tasks: Vec<Assignment> = cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect();
-        let owners = draft::random_draft(&tasks, players, captain, &mut rng).ok_or("no legal draft")?;
-        for (a, o) in tasks.iter_mut().zip(owners) {
-            a.owner = o;
-        }
-        let s = Situation {
-            title: Some(format!("bench seed {seed} #{}", i + 1)),
-            target: Some(target),
-            hands,
-            tasks,
-            ..Situation::default()
+        let s = match &loaded {
+            Some(list) => list[i].clone(),
+            None => {
+                let hands = Game::random_hands(players, &mut rng);
+                let captain = Game::new(&hands).unwrap().captain as usize;
+                let cards = draft::draw_tasks(catalogue(), players, target, &mut rng).ok_or("could not draw tasks")?;
+                let mut tasks: Vec<Assignment> =
+                    cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect();
+                let owners = draft::random_draft(&tasks, players, captain, &mut rng).ok_or("no legal draft")?;
+                for (a, o) in tasks.iter_mut().zip(owners) {
+                    a.owner = o;
+                }
+                Situation {
+                    title: Some(format!("bench seed {seed} #{}", i + 1)),
+                    target: Some(target),
+                    hands,
+                    tasks,
+                    ..Situation::default()
+                }
+            }
         };
-        let (res, secs) = solve_with_timeout(&s, timeout);
-        let (label, nodes) = match &res {
-            Ok((Verdict::Feasible(_), st)) => ("feasible", st.nodes),
-            Ok((Verdict::Infeasible, st)) => ("infeasible", st.nodes),
-            Ok((Verdict::Redeal(_), _)) => ("re-deal", 0),
-            Ok((Verdict::Cancelled, st)) => ("timeout", st.nodes),
-            Err(_) => ("error", 0),
-        };
+        let ((label, nodes), secs) = timed_verdict(&s, timeout);
+        total_secs += secs;
+        total_nodes += nodes;
         if verbose {
             let ids: Vec<&str> = s.tasks.iter().map(|a| a.card.id.as_str()).collect();
             println!("#{:<3} {:<10} {:>8.3} s {:>12} nodes  {}", i + 1, label, secs, nodes, ids.join(" | "));
@@ -119,7 +158,11 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
         rows.push((label, secs));
         saved.push(s);
     }
-    println!("{players} players, target {target}, {count} missions, seed {seed}, timeout {timeout} s");
+    match &load {
+        Some(path) => println!("{path}: {count} situations, timeout {timeout} s"),
+        None => println!("{players} players, target {target}, {count} missions, seed {seed}, timeout {timeout} s"),
+    }
+    println!("  total {total_secs:.1} s, {total_nodes} nodes");
     for label in ["feasible", "infeasible", "re-deal", "timeout", "error"] {
         let mut t: Vec<f64> = rows.iter().filter(|r| r.0 == label).map(|r| r.1).collect();
         if t.is_empty() {
