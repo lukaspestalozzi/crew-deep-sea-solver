@@ -11,7 +11,7 @@
 //! orders the moves, and the [`Strategy`] (depth-first or best-first).
 
 use crate::card::{Card, CardSet, Suit};
-use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE, TASK_AWARE_RANDOM};
+use crate::decider::{MoveDecider, Position, DECK_ORDER, LOOKAHEAD, TASK_AWARE_RANDOM};
 use crate::game::{Game, MAX_PLAYERS};
 use crate::situation::{Owner, Situation};
 use crate::task::{any_final_counts, merge, req_bounds, top_subs_count, Boundaries, CountRule, Kind, Req, Status, NO_BOUNDARIES};
@@ -117,7 +117,7 @@ impl Default for Options<'_> {
             count_check: true,
             cancel: None,
             progress: None,
-            decider: &TASK_AWARE,
+            decider: &LOOKAHEAD,
             strategy: Strategy::Portfolio { first_budget: 100_000 },
             cache_limit: 4_000_000,
             node_limit: None,
@@ -1465,8 +1465,8 @@ tasks:
 
     #[test]
     fn node_limit_gives_undecided() {
-        // From the deal, two hard tasks: far more than 10 000 nodes.
-        let s = situation("Player2: win all 9s\nPlayer3: tricks =0");
+        // Proving this impossible takes millions of nodes (no pink leads: P9 can only be discarded).
+        let s = situation("Player4: win P9 Y8\ncrew: rule M12 no-lead pink sub");
         let opts = Options { node_limit: Some(10_000), ..Options::default() };
         let (v, stats) = solve(&s, &opts).unwrap();
         assert_eq!(v, Verdict::Undecided, "{stats:?}");
@@ -1659,5 +1659,36 @@ Player1: {task}"
             assert_eq!(v, Verdict::Infeasible, "{task}");
             assert!(stats.nodes <= 2, "{task}: {} nodes", stats.nodes);
         }
+    }
+
+    #[test]
+    fn lookahead_order_agrees_with_depth_first() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(88);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let reference =
+                solve_drafts(&s, &Options { strategy: Strategy::Dfs, decider: &crate::decider::DECK_ORDER, ..Options::default() }).unwrap().0;
+            let opts = Options { decider: &crate::decider::LOOKAHEAD, ..Options::default() };
+            let (v, owners, _) = solve_drafts(&s, &opts).unwrap();
+            match (&reference, &v) {
+                (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                    let mut d = s.clone();
+                    for (t, o) in d.tasks.iter_mut().zip(owners.unwrap()) {
+                        t.owner = o;
+                    }
+                    check_line(&d, line);
+                    feasible += 1;
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => infeasible += 1,
+                _ => panic!("case {case}: dfs {reference:?}, lookahead {v:?}"),
+            }
+        }
+        assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
     }
 }

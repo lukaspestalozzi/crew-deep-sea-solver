@@ -105,6 +105,9 @@ fn search_options(args: &[String]) -> Options<'static> {
     if args.iter().any(|a| a == "--deck-order") {
         o.decider = &crew_core::decider::DECK_ORDER;
     }
+    if args.iter().any(|a| a == "--task-aware") {
+        o.decider = &crew_core::decider::TASK_AWARE;
+    }
     if args.iter().any(|a| a == "--zobrist") {
         o.zobrist = true;
     }
