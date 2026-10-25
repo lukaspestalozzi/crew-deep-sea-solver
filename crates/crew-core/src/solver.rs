@@ -443,6 +443,18 @@ fn destiny_ok(g: &Game, settled: &[(usize, Req)]) -> bool {
         }
     }
     for &(p, ref r) in settled {
+        // "All cards of one of these sets": some set must be free of other
+        // players' claims and of cards this player must not win.
+        if r.n_alternatives > 0
+            && !r.alternatives().iter().any(|set| {
+                set.iter().all(|c| {
+                    let i = c.index() as usize;
+                    claim[i] & !(1 << p) == 0 && forbid[i] & (1 << p) == 0
+                })
+            })
+        {
+            return false;
+        }
         for &(set, k) in r.demands() {
             let left = set.iter().filter(|c| {
                 let i = c.index() as usize;
@@ -1428,5 +1440,24 @@ tasks:
         }
         assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
         assert!(pruned > 10, "the checks should cut some proofs short: {pruned}");
+    }
+
+    /// Impossibilities visible from the hands are found at once, not by search.
+    #[test]
+    fn obvious_impossibilities_are_immediate() {
+        // Player1 holds P2: it cannot also play the submarine that wins it.
+        // Player2 does not hold S3: taking it needs a higher submarine it would win too.
+        // "more yellow than blue" with "no yellow" for the same player.
+        // All of a colour needs more than one trick (each holder plays one card per trick).
+        for tasks in [
+            "Player1: win P2 with sub",
+            "Player2: only S3",
+            "Player2: more yellow than blue\nPlayer2: no yellow",
+            "Player3: all of a colour\nPlayer3: tricks =1",
+        ] {
+            let (v, stats) = solve(&situation(tasks), &Options::default()).unwrap();
+            assert_eq!(v, Verdict::Infeasible, "{tasks}");
+            assert!(stats.nodes <= 2, "{tasks}: {} nodes", stats.nodes);
+        }
     }
 }

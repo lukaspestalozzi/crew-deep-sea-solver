@@ -165,12 +165,19 @@ impl Kind {
                     return Done;
                 }
                 let mine = g.hands[owner].intersect(CardSet::colour_value(*value));
+                // The contained card is another player's; it must not beat the
+                // winning card, so a higher or equal one must be of another suit.
+                let others_cards = unplayed.minus(g.hands[owner]);
                 let feasible = !over
                     && !mine.is_empty()
                     && match containing {
                         None => true,
-                        Some(cv) if cv == value => unplayed.intersect(CardSet::colour_value(*cv)).len() >= 2,
-                        Some(cv) => !unplayed.intersect(CardSet::colour_value(*cv)).is_empty(),
+                        Some(cv) => mine.iter().any(|x| {
+                            others_cards
+                                .intersect(CardSet::colour_value(*cv))
+                                .iter()
+                                .any(|y| y.suit() != x.suit() || y.value() < x.value())
+                        }),
                     };
                 if feasible {
                     Open
@@ -204,6 +211,8 @@ impl Kind {
                 match p {
                     TrickProp::CardWonBySub(c) | TrickProp::CardInLastTrick(c) if !unplayed.contains(*c) => Failed,
                     TrickProp::CardWonBySub(_) if g.hands[owner].intersect(Suit::Sub.cards()).is_empty() => Failed,
+                    // The owner plays one card per trick: not both the card and the submarine.
+                    TrickProp::CardWonBySub(c) if g.hands[owner].contains(*c) => Failed,
                     _ if !trick_still_possible(p, g) => Failed,
                     _ => Open,
                 }
@@ -334,6 +343,9 @@ impl Kind {
                     || others().any(|q| g.won[q].contains(target))
                     || (over && !my_subs.contains(target))
                     || (!my_subs.contains(target) && !can_capture(g, owner, target))
+                    // Taking the target from another player needs a higher submarine
+                    // of the owner, which the owner then wins too.
+                    || (!my_subs.contains(target) && !g.hands[owner].contains(target))
                 {
                     Failed
                 } else if my_subs.contains(target) && (over || unplayed.intersect(Suit::Sub.cards()).is_empty()) {
@@ -767,6 +779,9 @@ pub struct Req {
     pub n_demands: usize,
     pub more_wins: u8,
     pub more_losses: u8,
+    /// The owner must win all cards of one of these sets (e.g. a colour).
+    pub alternatives: [CardSet; 4],
+    pub n_alternatives: usize,
 }
 
 impl Req {
@@ -779,6 +794,10 @@ impl Req {
 
     pub fn demands(&self) -> &[(CardSet, u8)] {
         &self.demands[..self.n_demands]
+    }
+
+    pub fn alternatives(&self) -> &[CardSet] {
+        &self.alternatives[..self.n_alternatives]
     }
 }
 
@@ -814,6 +833,40 @@ impl Kind {
             }
             Kind::NoneOfFirst(k) => r.more_losses = (*k as usize).saturating_sub(g.tricks.len()) as u8,
             Kind::WinWith { .. } | Kind::Trick(_) => r.more_wins = 1,
+            Kind::AllOfAColour => {
+                let others: CardSet = (0..g.n).filter(|&q| q != owner).fold(CardSet::EMPTY, |a, q| a.union(g.won[q]));
+                let mut best = u8::MAX;
+                for s in Suit::COLOURS {
+                    if others.intersect(s.cards()).is_empty() {
+                        let rest = s.cards().intersect(unplayed);
+                        r.alternatives[r.n_alternatives] = rest;
+                        r.n_alternatives += 1;
+                        let need = (0..g.n).map(|h| g.hands[h].intersect(rest).len() as u8).max().unwrap_or(0);
+                        best = best.min(need);
+                    }
+                }
+                if r.n_alternatives == 1 {
+                    r.need = r.alternatives[0];
+                    r.n_alternatives = 0;
+                } else if best != u8::MAX {
+                    r.more_wins = best;
+                }
+            }
+            Kind::MoreOf(a, b) => {
+                let (ha, hb) = (won.intersect(a.cards()).len() as u8, won.intersect(b.cards()).len() as u8);
+                if ha <= hb {
+                    r.demand(a.cards().intersect(unplayed), hb + 1 - ha);
+                }
+            }
+            Kind::SameOf(a, b) => {
+                let (ha, hb) = (won.intersect(a.cards()).len() as u8, won.intersect(b.cards()).len() as u8);
+                if ha < hb.max(1) {
+                    r.demand(a.cards().intersect(unplayed), hb.max(1) - ha);
+                }
+                if hb < ha.max(1) {
+                    r.demand(b.cards().intersect(unplayed), ha.max(1) - hb);
+                }
+            }
             _ => {}
         }
         r
