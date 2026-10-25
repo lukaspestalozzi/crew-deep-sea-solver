@@ -10,7 +10,7 @@ use crew_core::card::Card;
 use crew_core::catalogue::catalogue;
 use crew_core::notation;
 use crew_core::situation::{Assignment, Owner, PlayedTrick, Situation};
-use crew_core::solver::{self, Options, Verdict};
+use crew_core::solver::{self, Decision, Options, Verdict};
 use crew_core::task::{Kind, TrickProp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -339,8 +339,15 @@ pub fn solve_drafts_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
 /// smallest fix; this asks whether another draft would have worked, so it
 /// starts from the deal and ignores played tricks.
 #[wasm_bindgen]
-pub fn drafts(text: &str, all_drafts: bool, limit: u32, part: u32, parts: u32, progress: JsValue) -> String {
+pub fn drafts(text: &str, all_drafts: bool, limit: u32, part: u32, parts: u32, progress: JsValue, decided: JsValue) -> String {
     let cb = progress_fn(&progress);
+    let on_decided = progress_fn(&decided);
+    // Called with each settled draft as JSON: owners, status, line, tricks.
+    let tell = |draft: String| {
+        if let Some(f) = &on_decided {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&draft));
+        }
+    };
     // Called with (checked, planned, working so far, drafts still open).
     let report = |checked: u64, planned: u64, working: u64, open: u64| {
         if let Some(f) = &cb {
@@ -353,7 +360,7 @@ pub fn drafts(text: &str, all_drafts: bool, limit: u32, part: u32, parts: u32, p
             let _ = f.apply(&JsValue::NULL, &args);
         }
     };
-    drafts_impl(text, all_drafts, limit, (part as usize, parts as usize), Some(&report))
+    drafts_impl(text, all_drafts, limit, (part as usize, parts as usize), Some(&report), Some(&tell))
 }
 
 pub fn drafts_impl(
@@ -362,6 +369,7 @@ pub fn drafts_impl(
     limit: u32,
     part: (usize, usize),
     progress: Option<&dyn Fn(u64, u64, u64, u64)>,
+    decided: Option<&dyn Fn(String)>,
 ) -> String {
     let mut s = match situation(text) {
         Ok(s) => s,
@@ -369,34 +377,46 @@ pub fn drafts_impl(
     };
     let mut reference = None;
     if all_drafts {
-        s.played.clear();
         reference = Some(s.tasks.iter().map(|a| a.owner).collect::<Vec<_>>());
-        for a in s.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
-            a.owner = Owner::Unknown;
-        }
+        open_all(&mut s);
     }
+    let with_owners = |owners: &[Owner], line: &[Card]| {
+        let mut d = s.clone();
+        for (a, o) in d.tasks.iter_mut().zip(owners) {
+            a.owner = *o;
+        }
+        json!({
+            "owners": owners.iter().map(|&o| owner_str(o)).collect::<Vec<_>>(),
+            "line": line.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "tricks": line_tricks(&d, line),
+        })
+    };
+    let note = |owners: &[Owner], d: &Decision| {
+        if let Some(f) = decided {
+            let v = match d {
+                Decision::Works(l) => {
+                    let mut v = with_owners(owners, l);
+                    v["status"] = json!("works");
+                    v
+                }
+                Decision::Fails => json!({ "owners": owners.iter().map(|&o| owner_str(o)).collect::<Vec<_>>(), "status": "fails" }),
+                Decision::Open => return,
+            };
+            f(v.to_string());
+        }
+    };
     let opts = DraftOptions {
         limit: limit as u64,
         reference,
         progress,
         part,
         cache_limit: cache_share(part.1 as u32),
+        decided: Some(&note),
         ..DraftOptions::default()
     };
     match analysis::draft_search(&s, &opts) {
         Err(e) => err(e),
         Ok(r) => {
-            let with_owners = |owners: &[Owner], line: &[Card]| {
-                let mut d = s.clone();
-                for (a, o) in d.tasks.iter_mut().zip(owners) {
-                    a.owner = *o;
-                }
-                json!({
-                    "owners": owners.iter().map(|&o| owner_str(o)).collect::<Vec<_>>(),
-                    "line": line.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-                    "tricks": line_tricks(&d, line),
-                })
-            };
             ok(json!({
                 "total": r.total,
                 "checked": r.checked,
@@ -468,6 +488,48 @@ pub fn tightness(text: &str, line_json: &str) -> String {
         Ok(Some(t)) => ok(json!({ "critical": t.critical, "choices": t.choices, "tightness": t.tightness })),
         Ok(None) => ok(Value::Null),
         Err(e) => err(e),
+    }
+}
+
+/// From the deal, with every task except rule cards open to all players.
+fn open_all(s: &mut Situation) {
+    s.played.clear();
+    for a in s.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
+        a.owner = Owner::Unknown;
+    }
+}
+
+/// Pairs of open tasks one player cannot fulfil together even without the
+/// other tasks (`all_drafts`: every task open, from the deal). Every n-th
+/// pair from `part`; progress (pairs done, pairs). Returns
+/// [{tasks: [i, j], players, tried}] with 0-based player indices.
+#[wasm_bindgen]
+pub fn pair_conflicts(text: &str, all_drafts: bool, part: u32, parts: u32, progress: JsValue) -> String {
+    let cb = progress_fn(&progress);
+    let report = |a: usize, b: usize| {
+        if let Some(f) = &cb {
+            let _ = f.call2(&JsValue::NULL, &JsValue::from_f64(a as f64), &JsValue::from_f64(b as f64));
+        }
+    };
+    pair_conflicts_impl(text, all_drafts, (part as usize, parts as usize), Some(&report))
+}
+
+pub fn pair_conflicts_impl(text: &str, all_drafts: bool, part: (usize, usize), progress: Option<&dyn Fn(usize, usize)>) -> String {
+    let mut s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    if all_drafts {
+        open_all(&mut s);
+    }
+    let opts = Options { cache_limit: cache_share(part.1 as u32), ..Options::default() };
+    match analysis::pair_conflicts(&s, part, &opts, progress) {
+        Err(e) => err(e),
+        Ok(None) => ok(json!(null)),
+        Ok(Some(v)) => ok(json!(v
+            .iter()
+            .map(|c| json!({ "tasks": [c.tasks.0, c.tasks.1], "players": c.players, "tried": c.tried }))
+            .collect::<Vec<_>>())),
     }
 }
 
@@ -574,11 +636,25 @@ Player2: win B4
         let r: Value = serde_json::from_str(&solve_impl(&fixed, None)).unwrap();
         assert_eq!(r["ok"]["verdict"], "feasible");
         assert!(r["ok"]["tricks"].as_array().unwrap().len() >= 1);
-        let d: Value = serde_json::from_str(&drafts_impl(TEXT, false, 2000, (0, 1), None)).unwrap();
+        let list = std::cell::RefCell::new(Vec::<Value>::new());
+        let collect = |x: String| list.borrow_mut().push(serde_json::from_str(&x).unwrap());
+        let d: Value = serde_json::from_str(&drafts_impl(TEXT, false, 2000, (0, 1), None, Some(&collect))).unwrap();
+        let list = list.into_inner();
         assert_eq!(d["ok"]["any_works"], true);
         assert!(d["ok"]["total"].as_u64().unwrap() > 0);
+        assert_eq!(list.len() as u64, d["ok"]["total"].as_u64().unwrap());
+        let works = list.iter().filter(|x| x["status"] == "works").count() as u64;
+        assert_eq!(works, d["ok"]["working"].as_u64().unwrap());
+        assert!(list.iter().filter(|x| x["status"] == "works").all(|x| !x["line"].as_array().unwrap().is_empty()));
         let bad: Value = serde_json::from_str(&parse("crew 2")).unwrap();
         assert_eq!(bad["error"]["line"], 1);
+    }
+
+    #[test]
+    fn pair_conflicts_return_json() {
+        let text = TEXT.replace("?: first-trick", "?: tricks =0");
+        let r: Value = serde_json::from_str(&pair_conflicts_impl(&text, true, (0, 1), None)).unwrap();
+        assert!(r["ok"].as_array().unwrap().iter().any(|c| !c["players"].as_array().unwrap().is_empty()), "{r}");
     }
 
     #[test]

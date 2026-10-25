@@ -35,7 +35,7 @@ cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
 - `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
-- `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once.
+- `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once. Then prints who takes what: owners every working draft has ("must") or none has ("never"), task pairs always or never with the same player, and the strongest tendencies, each compared with all drafts so that what the draft rules force is left out.
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
 - `--dfs`, `--best-first`, `--task-aware`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
 - `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file.
@@ -128,6 +128,8 @@ Rule cards are not generated.
 The grammar is in `crates/crew-core/src/generate.rs`.
 
 ## Web app
+
+After "Drafts that work", the result shows **who takes which task**: a task × player table (share of working drafts in which that player has the task, "must" / "never"), task pairs always or never with the same player and the strongest tendencies, and the working drafts (tap one for its winning line). Tapping a cell fixes that choice and narrows every figure, like drafting in turn. Drafts arrive while the count runs, so a cancelled count keeps what it found. "Check pairs alone" gives each pair of tasks to one player without the other tasks, to tell "these two never fit together" from "only in this mission".
 
 ```sh
 rustup target add wasm32-unknown-unknown

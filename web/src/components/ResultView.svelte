@@ -4,10 +4,11 @@
   // critical decisions, random deals) run when asked for.
   import { onDestroy, untrack } from 'svelte';
   import TrickList from './TrickList.svelte';
+  import DraftExplorer from './DraftExplorer.svelte';
   import Card from './Card.svelte';
   import { winningPosition } from '../lib/cards';
   import { i18n } from '../lib/i18n.svelte';
-  import { Cancelled, SolverClient, SolverPool, mergeDrafts, type DraftsOut, type NoReturnOut, type SolveDraftsOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
+  import { Cancelled, SolverClient, SolverPool, mergeDrafts, type DraftRow, type DraftsOut, type PairConflict, type NoReturnOut, type SolveDraftsOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
   import { isInferred, textOf } from '../lib/tasks';
   import { check, parse, toText, type Situation } from '../lib/wasm';
 
@@ -26,9 +27,48 @@
     client.cancel();
     pool.cancel();
   });
+  /** Decided drafts, streamed from the workers (kept when cancelled). */
+  let rows = $state.raw<DraftRow[]>([]);
+  /** Drafts the count plans to decide (sample or all). */
+  let planned = $state(0);
+  /** A draft picked from the list, whose line is shown. */
+  let picked = $state<DraftRow | null>(null);
+  /** Whether the rows are over all drafts from the deal (owners entered ignored). */
+  let rowsAll = false;
+  /** Pairs of tasks that cannot share a player even alone (on demand). */
+  let pairs = $state<PairConflict[] | null>(null);
+  let buffer: DraftRow[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  function flush() {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = null;
+    if (buffer.length) rows = rows.concat(buffer);
+    buffer = [];
+  }
+  function collect(r: DraftRow) {
+    buffer.push(r);
+    flushTimer ??= setTimeout(flush, 300);
+  }
+  function resetRows() {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = null;
+    buffer = [];
+    rows = [];
+    planned = 0;
+    picked = null;
+    pairs = null;
+  }
+
   /** Count drafts on all workers; parts: see [`SolverPool`]. */
-  const poolDrafts = async (all: boolean) =>
-    mergeDrafts(await pool.all<DraftsOut>('drafts', [text, all, LIMIT], draftProgressFn));
+  async function poolDrafts(all: boolean) {
+    resetRows();
+    rowsAll = all;
+    try {
+      return mergeDrafts(await pool.all<DraftsOut>('drafts', [text, all, LIMIT], draftProgressFn, collect));
+    } finally {
+      flush();
+    }
+  }
 
   let running = $state(false);
   let cancelled = $state(false);
@@ -66,7 +106,8 @@
   $effect(() => onverdict(verdict));
 
   // The line to show: the entered draft's, or a working draft's.
-  const shownLine = $derived.by((): { tricks: TrickOut[]; owners?: string[]; fromFix?: boolean } | null => {
+  const shownLine = $derived.by((): { tricks: TrickOut[]; owners?: string[]; fromFix?: boolean; picked?: boolean } | null => {
+    if (picked?.tricks) return { tricks: picked.tricks, owners: picked.owners, picked: true };
     if (solveOut?.verdict === 'feasible') return { tricks: solveOut.tricks };
     if (unknownOwners && draftsOut?.verdict === 'feasible') return { tricks: draftsOut.tricks, owners: draftsOut.owners };
     if (altDrafts?.closest) return { ...altDrafts.closest, fromFix: true };
@@ -83,6 +124,7 @@
   async function run(text: string) {
     client.cancel();
     pool.cancel();
+    resetRows();
     running = true;
     cancelled = false;
     lastProgress = '';
@@ -146,6 +188,7 @@
   function cancel() {
     client.cancel();
     pool.cancel();
+    flush();
     cancelled = true;
     running = false;
   }
@@ -167,6 +210,7 @@
 
   // (checked, planned, working so far, drafts still open)
   function draftProgressFn(a: number, b: number, w: number, open: number) {
+    planned = b;
     progress = a < b ? i18n.t('draftsChecked', { a, b, w, n: open }) : i18n.t('draftsSettling', { w, n: open });
     lastProgress = progress;
   }
@@ -176,6 +220,16 @@
     extra(async () => {
       if (unknownOwners) drafts = await poolDrafts(false);
       else altDrafts = await poolDrafts(true);
+    });
+
+  /** Each pair of open tasks on one player without the rest, on all workers. */
+  const checkPairs = () =>
+    extra(async () => {
+      const parts = await pool.all<PairConflict[] | null>('pair_conflicts', [text, rowsAll], (a, b) => {
+        progress = i18n.t('pairsChecked', { a, b });
+        lastProgress = progress;
+      });
+      pairs = parts.flatMap((p) => p ?? []).sort((x, y) => x.tasks[0] - y.tasks[0] || x.tasks[1] - y.tasks[1]);
     });
 
   /** Critical decisions and tightness along the shown line. */
@@ -286,6 +340,21 @@
     </div>
   {/if}
 
+  {#if situation && rows.length}
+    <DraftExplorer
+      {situation}
+      {rows}
+      open={Math.max(0, planned - rows.length)}
+      {pairs}
+      busy={running || robustRunning}
+      oncheckpairs={checkPairs}
+      onpick={(r) => {
+        picked = r;
+        step = null;
+      }}
+    />
+  {/if}
+
   {#if situation && conflict && conflict.length}
     <div class="panel">
       <span class="label">{i18n.t('whyFails')}</span>
@@ -366,7 +435,13 @@
   {#if situation && shownLine && shownLine.tricks.length}
     <div class="row between">
       <span class="label">
-        {shownLine.fromFix ? (altDrafts?.closest?.distance ? i18n.t('lineWithFix') : i18n.t('lineFromDeal')) : i18n.t('aWinningLine')}
+        {shownLine.picked
+          ? i18n.t('lineForDraft')
+          : shownLine.fromFix
+            ? altDrafts?.closest?.distance
+              ? i18n.t('lineWithFix')
+              : i18n.t('lineFromDeal')
+            : i18n.t('aWinningLine')}
       </span>
       {#if step === null}
         <button class="btn small outline-accent" onclick={() => (step = 1)}>{i18n.t('replay')}</button>
@@ -379,7 +454,7 @@
         </span>
       {/if}
     </div>
-    {#if shownLine.owners && (unknownOwners || shownLine.fromFix)}
+    {#if shownLine.owners && (unknownOwners || shownLine.fromFix || shownLine.picked)}
       <div class="panel small">
         {#each situation.tasks as t, i}
           <span>{i18n.owner(shownLine.owners[i])} · {textOf(t.id)}</span>

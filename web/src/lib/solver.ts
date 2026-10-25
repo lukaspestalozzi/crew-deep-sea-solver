@@ -7,6 +7,7 @@ type Pending = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   progress?: (...p: number[]) => void;
+  decided?: (d: DraftRow) => void;
 };
 
 export class Cancelled extends Error {
@@ -27,11 +28,15 @@ export class SolverClient {
   private spawn(): Worker {
     const worker = new SolverWorker();
     worker.onmessage = (e: MessageEvent) => {
-      const { id, progress, result } = e.data;
+      const { id, progress, decided, result } = e.data;
       const p = this.pending.get(id);
       if (!p) return;
       if (progress) {
         p.progress?.(...progress);
+        return;
+      }
+      if (decided) {
+        p.decided?.(decided);
         return;
       }
       this.pending.delete(id);
@@ -41,10 +46,10 @@ export class SolverClient {
     return worker;
   }
 
-  call<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T> {
+  call<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: DraftRow) => void): Promise<T> {
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress, decided });
       this.worker.postMessage({ id, fn, args });
     });
   }
@@ -68,7 +73,7 @@ export const CORES = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2
 export class SolverPool {
   private clients: SolverClient[] = [];
 
-  all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T[]> {
+  all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: DraftRow) => void): Promise<T[]> {
     while (this.clients.length < CORES) this.clients.push(new SolverClient());
     const n = this.clients.length;
     const last: number[][] = Array.from({ length: n }, () => []);
@@ -76,7 +81,7 @@ export class SolverPool {
       last[k] = p;
       progress?.(...p.map((_, i) => last.reduce((s, q) => s + (q[i] ?? 0), 0)));
     };
-    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p))));
+    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p), decided)));
   }
 
   cancel() {
@@ -127,6 +132,23 @@ export interface DraftLine {
   line: string[];
   tricks: TrickOut[];
   distance?: number;
+}
+
+/** One decided draft, streamed while the count runs. */
+export interface DraftRow {
+  owners: string[];
+  status: 'works' | 'fails';
+  line?: string[];
+  tricks?: TrickOut[];
+}
+
+/** Two tasks one player cannot fulfil together, even without the other tasks. */
+export interface PairConflict {
+  tasks: [number, number];
+  /** Players (0-based) for whom the pair fails. */
+  players: number[];
+  /** Players for whom both tasks are possible alone. */
+  tried: number[];
 }
 
 export interface DraftsOut {

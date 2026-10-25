@@ -9,6 +9,7 @@ self.onmessage = async (e: MessageEvent<Call>) => {
   await ready;
   const { id, fn, args } = e.data;
   const progress = (...p: number[]) => postMessage({ id, progress: p });
+  const decided = (draft: string) => postMessage({ id, decided: JSON.parse(draft) });
   let out: string;
   try {
     switch (fn) {
@@ -19,7 +20,10 @@ self.onmessage = async (e: MessageEvent<Call>) => {
         out = w.solve_drafts(args[0] as string, progress);
         break;
       case 'drafts':
-        out = w.drafts(args[0] as string, args[1] as boolean, args[2] as number, args[3] as number, args[4] as number, progress);
+        out = w.drafts(args[0] as string, args[1] as boolean, args[2] as number, args[3] as number, args[4] as number, progress, decided);
+        break;
+      case 'pair_conflicts':
+        out = w.pair_conflicts(args[0] as string, args[1] as boolean, args[2] as number, args[3] as number, progress);
         break;
       case 'conflict':
         out = w.conflict(args[0] as string);

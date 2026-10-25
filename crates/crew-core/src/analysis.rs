@@ -4,7 +4,7 @@ use crate::card::Card;
 use crate::draft;
 use crate::rng::Rng;
 use crate::situation::{Owner, Situation};
-use crate::solver::{self, Options, SolveError, Verdict};
+use crate::solver::{self, Decision, Options, SolveError, Verdict};
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 
@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 pub struct DraftReport {
     /// Number of legal drafts.
     pub total: u64,
-    /// Drafts actually solved.
+    /// Drafts decided (this part's share; all drafts if not sampled or split).
     pub checked: u64,
     /// Feasible drafts among those checked.
     pub working: u64,
@@ -31,6 +31,8 @@ pub struct DraftReport {
     pub closest: Option<(Vec<Owner>, usize, Vec<Card>)>,
     /// (task index, player) pairs ruled out because that task alone is impossible for that player.
     pub impossible_pairs: Vec<(usize, usize)>,
+    /// Every draft of this part (sampled or all) with its decision.
+    pub drafts: Vec<(Vec<Owner>, Decision)>,
 }
 
 #[derive(Clone)]
@@ -49,7 +51,13 @@ pub struct DraftOptions<'a> {
     pub part: (usize, usize),
     /// Lost positions kept per search (see [`Options::cache_limit`]).
     pub cache_limit: usize,
+    /// Called with each draft of this part (owners, decision) as it is
+    /// settled, so a caller that is stopped keeps what was found.
+    pub decided: Option<&'a OnDecided<'a>>,
 }
+
+/// Callback with a settled draft: (owners, decision).
+pub type OnDecided<'a> = dyn Fn(&[Owner], &Decision) + 'a;
 
 impl Default for DraftOptions<'_> {
     fn default() -> Self {
@@ -61,6 +69,7 @@ impl Default for DraftOptions<'_> {
             progress: None,
             part: (0, 1),
             cache_limit: Options::default().cache_limit,
+            decided: None,
         }
     }
 }
@@ -120,6 +129,7 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
         example: None,
         closest: None,
         impossible_pairs,
+        drafts: Vec::new(),
     };
 
     // The drafts to decide: all of them, or a sample.
@@ -150,38 +160,187 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
         owners.iter().enumerate().any(|(i, o)| matches!(o, Owner::Player(p) if s.tasks[i].owner == Owner::Unknown && !allowed(i, *p as usize)))
     };
     let rest: Vec<Vec<Owner>> = drafts.iter().filter(|d| !bad(d)).cloned().collect();
-    let skipped = (drafts.len() - rest.len()) as u64;
     let tell = |working: usize, open: usize| {
         if let Some(p) = opts.progress {
             p(planned - open as u64, planned, working as u64, open as u64);
         }
     };
-    match solver::decide_drafts(s, &rest, &solve_opts, Some(&tell))? {
-        None => {
-            report.checked = skipped;
-            report.undecided = rest.len() as u64;
+    if let Some(f) = opts.decided {
+        for d in drafts.iter().filter(|d| bad(d)) {
+            f(d, &Decision::Fails);
         }
-        Some(decided) => {
-            report.checked = drafts.len() as u64;
-            for (owners, line) in rest.iter().zip(decided) {
-                let Some(line) = line else { continue };
+    }
+    let note = |i: usize, d: &Decision| {
+        if let Some(f) = opts.decided {
+            f(&rest[i], d);
+        }
+    };
+    let mut decided = solver::decide_drafts(s, &rest, &solve_opts, Some(&tell), Some(&note))?.into_iter();
+    for owners in drafts {
+        let d = if bad(&owners) { Decision::Fails } else { decided.next().expect("one decision per draft") };
+        match &d {
+            Decision::Open => report.undecided += 1,
+            Decision::Fails => report.checked += 1,
+            Decision::Works(line) => {
+                report.checked += 1;
                 report.working += 1;
                 if let Some(r) = &opts.reference {
-                    let dist = distance(owners, r);
+                    let dist = distance(&owners, r);
                     if report.closest.as_ref().is_none_or(|c| dist < c.1) {
                         report.closest = Some((owners.clone(), dist, line.clone()));
                     }
                 }
                 if report.example.is_none() {
-                    report.example = Some((owners.clone(), line));
+                    report.example = Some((owners.clone(), line.clone()));
                 }
             }
         }
+        report.drafts.push((owners, d));
     }
     if report.example.is_none() {
         report.example = one_tree_example;
     }
     Ok(report)
+}
+
+/// Who takes which task, and which tasks share a player, over the decided
+/// drafts of a [`DraftReport`]. Working drafts are compared with all decided
+/// drafts, so what the draft rules force is not reported. (The web page
+/// computes the same live, with a filter.)
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DraftRelations {
+    /// (task, owner): every working draft has it, though the rules allow otherwise.
+    pub must: Vec<(usize, Owner)>,
+    /// (task, owner): no working draft has it, though the rules allow it.
+    pub never: Vec<(usize, Owner)>,
+    /// Task pairs with the same owner in every working draft / in none.
+    pub always_together: Vec<(usize, usize)>,
+    pub never_together: Vec<(usize, usize)>,
+    /// (task, task, share with the same owner among working drafts, among
+    /// all drafts): the largest gaps, at least [`TENDENCY_GAP`], at most 5.
+    pub tendencies: Vec<(usize, usize, f64, f64)>,
+}
+
+/// Minimum gap between the two shares for a tendency.
+pub const TENDENCY_GAP: f64 = 0.25;
+
+pub fn draft_relations(drafts: &[(Vec<Owner>, Decision)]) -> DraftRelations {
+    let rows: Vec<(&Vec<Owner>, bool)> =
+        drafts.iter().filter(|(_, d)| *d != Decision::Open).map(|(o, d)| (o, matches!(d, Decision::Works(_)))).collect();
+    let mut r = DraftRelations::default();
+    let works = rows.iter().filter(|x| x.1).count();
+    let Some(n) = rows.first().map(|x| x.0.len()) else { return r };
+    if works == 0 {
+        return r;
+    }
+    let tasks: Vec<usize> = (0..n).filter(|&t| rows.iter().any(|x| x.0[t] != rows[0].0[t])).collect();
+    // (working drafts, all drafts) with the property.
+    let count = |p: &dyn Fn(&[Owner]) -> bool| {
+        rows.iter().fold((0, 0), |(w, a), x| if p(x.0) { (w + x.1 as usize, a + 1) } else { (w, a) })
+    };
+    for &t in &tasks {
+        let mut owners: Vec<Owner> = rows.iter().map(|x| x.0[t]).collect();
+        owners.sort_by_key(|o| format!("{o:?}"));
+        owners.dedup();
+        for o in owners {
+            match count(&|d| d[t] == o) {
+                (w, a) if w == works && a < rows.len() => r.must.push((t, o)),
+                (0, a) if a > 0 => r.never.push((t, o)),
+                _ => {}
+            }
+        }
+    }
+    let mut rest = Vec::new();
+    for (k, &t1) in tasks.iter().enumerate() {
+        for &t2 in &tasks[k + 1..] {
+            match count(&|d| d[t1] == d[t2]) {
+                (w, a) if w == works && a < rows.len() => r.always_together.push((t1, t2)),
+                (0, a) if a > 0 => r.never_together.push((t1, t2)),
+                (_, 0) => {}
+                (w, a) => rest.push((t1, t2, w as f64 / works as f64, a as f64 / rows.len() as f64)),
+            }
+        }
+    }
+    let gap = |x: &(usize, usize, f64, f64)| (x.2 - x.3).abs();
+    rest.retain(|x| gap(x) >= TENDENCY_GAP);
+    rest.sort_by(|x, y| gap(y).total_cmp(&gap(x)));
+    rest.truncate(5);
+    r.tendencies = rest;
+    r
+}
+
+/// A pair of tasks that one player cannot fulfil together, even without the
+/// other tasks, though each alone is possible for that player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairConflict {
+    pub tasks: (usize, usize),
+    /// Players for whom the pair fails.
+    pub players: Vec<usize>,
+    /// Players for whom both tasks are possible alone (the pair was tried).
+    pub tried: Vec<usize>,
+}
+
+/// Every pair of tasks with owner `?`, given to one player with the rest of
+/// the mission removed (played tricks kept). `part` (k, n): only every n-th
+/// pair from k, for parallel workers. Progress: (pairs done, pairs of this
+/// part). `None` if cancelled.
+pub fn pair_conflicts(
+    s: &Situation,
+    part: (usize, usize),
+    opts: &Options,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<Option<Vec<PairConflict>>, SolveError> {
+    let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
+    let (n, captain) = (g.n, g.captain as usize);
+    let open: Vec<usize> = (0..s.tasks.len()).filter(|&i| s.tasks[i].owner == Owner::Unknown).collect();
+    let with = |tasks: &[usize], p: usize| {
+        let mut x = s.clone();
+        x.tasks = tasks.iter().map(|&i| crate::situation::Assignment { card: s.tasks[i].card, owner: Owner::Player(p as u8) }).collect();
+        x
+    };
+    // None: cancelled.
+    let feasible = |tasks: &[usize], p: usize| -> Result<Option<bool>, SolveError> {
+        Ok(match solver::solve(&with(tasks, p), opts)?.0 {
+            Verdict::Feasible(_) => Some(true),
+            Verdict::Infeasible | Verdict::Redeal(_) => Some(false),
+            _ => None,
+        })
+    };
+    let may_take = |i: usize, p: usize| p != captain || s.tasks[i].card.captain_allowed();
+    let pairs: Vec<(usize, usize)> = open
+        .iter()
+        .enumerate()
+        .flat_map(|(k, &i)| open[k + 1..].iter().map(move |&j| (i, j)))
+        .enumerate()
+        .filter(|(k, _)| k % part.1.max(1) == part.0)
+        .map(|(_, x)| x)
+        .collect();
+    // Possible alone, for the tasks of this part's pairs.
+    let mut alone = vec![vec![false; n]; s.tasks.len()];
+    for &i in open.iter().filter(|&&i| pairs.iter().any(|&(a, b)| a == i || b == i)) {
+        for p in (0..n).filter(|&p| may_take(i, p)) {
+            let Some(ok) = feasible(&[i], p)? else { return Ok(None) };
+            alone[i][p] = ok;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, &(i, j)) in pairs.iter().enumerate() {
+        if let Some(f) = progress {
+            f(k, pairs.len());
+        }
+        let tried: Vec<usize> = (0..n).filter(|&p| alone[i][p] && alone[j][p]).collect();
+        let mut players = Vec::new();
+        for &p in &tried {
+            let Some(ok) = feasible(&[i, j], p)? else { return Ok(None) };
+            if !ok {
+                players.push(p);
+            }
+        }
+        if !players.is_empty() {
+            out.push(PairConflict { tasks: (i, j), players, tried });
+        }
+    }
+    Ok(Some(out))
 }
 
 // ---------------------------------------------------------------- conflicts
@@ -478,6 +637,50 @@ tasks:
         players.sort();
         assert_eq!(players, vec![1, 3]);
         assert_eq!(r.any_works, Some(true));
+    }
+
+    #[test]
+    fn draft_relations_compare_working_with_all_drafts() {
+        let p = |i: u8| Owner::Player(i);
+        let line = vec![Card::parse("B1").unwrap()];
+        let mut rows = Vec::new();
+        for a in 0..2 {
+            for b in 0..2 {
+                for c in 0..2 {
+                    let works = a == b && c == 1;
+                    rows.push((vec![p(a), p(b), p(c), Owner::Crew], if works { Decision::Works(line.clone()) } else { Decision::Fails }));
+                }
+            }
+        }
+        let r = draft_relations(&rows);
+        assert_eq!(r.must, vec![(2, p(1))]);
+        assert_eq!(r.never, vec![(2, p(0))]);
+        assert_eq!(r.always_together, vec![(0, 1)]);
+        assert!(r.never_together.is_empty() && r.tendencies.is_empty());
+        // Open drafts are left out; rules that never allow a pair are not reported.
+        let ruled: Vec<_> = rows.iter().filter(|(o, _)| o[0] != o[1]).map(|(o, _)| (o.clone(), Decision::Works(line.clone()))).collect();
+        let mut with_open = ruled.clone();
+        with_open.push((vec![p(0), p(0), p(0), Owner::Crew], Decision::Open));
+        assert_eq!(draft_relations(&with_open), draft_relations(&ruled));
+        assert!(draft_relations(&ruled).never_together.is_empty());
+    }
+
+    #[test]
+    fn pair_conflicts_find_tasks_that_cannot_share_a_player() {
+        // Winning B4 or Y1 needs a trick; "win no tricks" allows none.
+        let s = situation("?: win B4\n?: tricks =0\n?: win Y1");
+        let all = pair_conflicts(&s, (0, 1), &Options::default(), None).unwrap().unwrap();
+        let pairs: Vec<(usize, usize)> = all.iter().map(|c| c.tasks).collect();
+        assert!(pairs.contains(&(0, 1)) && pairs.contains(&(1, 2)), "{all:?}");
+        for c in all.iter().filter(|c| c.tasks.1 == 1 || c.tasks.0 == 1) {
+            assert!(!c.tried.is_empty());
+            assert_eq!(c.players, c.tried, "fails for every player who could take both");
+        }
+        // Parts add up to the whole.
+        let mut parts: Vec<PairConflict> =
+            (0..2).flat_map(|k| pair_conflicts(&s, (k, 2), &Options::default(), None).unwrap().unwrap()).collect();
+        parts.sort_by_key(|c| c.tasks);
+        assert_eq!(parts, all);
     }
 
     #[test]

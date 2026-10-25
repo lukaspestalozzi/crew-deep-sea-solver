@@ -217,6 +217,28 @@ fn owner_name(o: &Owner) -> String {
     }
 }
 
+/// Who takes which task and which tasks share a player, if anything stands out.
+fn print_relations(s: &Situation, r: &analysis::DraftRelations) {
+    let id = |t: usize| s.tasks[t].card.id.as_str();
+    let lines: Vec<String> = r
+        .must
+        .iter()
+        .map(|&(t, o)| format!("must:  {} · {}", owner_name(&o), id(t)))
+        .chain(r.never.iter().map(|&(t, o)| format!("never: {} · {}", owner_name(&o), id(t))))
+        .chain(r.always_together.iter().map(|&(a, b)| format!("always same player: {} + {}", id(a), id(b))))
+        .chain(r.never_together.iter().map(|&(a, b)| format!("never same player:  {} + {}", id(a), id(b))))
+        .chain(r.tendencies.iter().map(|&(a, b, w, all)| {
+            format!("same player in {:.0}% of working drafts ({:.0}% of all): {} + {}", 100.0 * w, 100.0 * all, id(a), id(b))
+        }))
+        .collect();
+    if !lines.is_empty() {
+        println!("who takes what (working drafts compared with all drafts):");
+        for l in lines {
+            println!("  {l}");
+        }
+    }
+}
+
 fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
     let start = Instant::now();
     let opts = DraftOptions { reference, limit, ..DraftOptions::default() };
@@ -241,6 +263,10 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
             for &(i, p) in &r.impossible_pairs {
                 println!("  impossible on its own: Player{} · {}", p + 1, s.tasks[i].card.id);
             }
+            let mut rel = analysis::draft_relations(&r.drafts);
+            // Already listed as impossible on its own.
+            rel.never.retain(|&(t, o)| !matches!(o, Owner::Player(p) if r.impossible_pairs.contains(&(t, p as usize))));
+            print_relations(s, &rel);
             let shown = match (&r.closest, &r.example) {
                 (Some((owners, dist, line)), _) => {
                     println!("smallest fix ({dist} task(s) change owner):");

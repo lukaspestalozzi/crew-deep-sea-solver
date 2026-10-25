@@ -230,9 +230,19 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
     (verdict, owners, search.stats)
 }
 
-/// The result of deciding a list of drafts: per draft, a winning line or
-/// `None` (infeasible).
-pub type DraftDecisions = Vec<Option<Vec<Card>>>;
+/// What deciding one draft found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Feasible, with a winning line.
+    Works(Vec<Card>),
+    /// Infeasible.
+    Fails,
+    /// Not decided (cancelled before).
+    Open,
+}
+
+/// The result of deciding a list of drafts, one [`Decision`] per draft.
+pub type DraftDecisions = Vec<Decision>;
 
 /// Decide every draft in `drafts` (one owner per task, as in
 /// [`Situation::tasks`]); exact. Rounds with a node budget that doubles each
@@ -240,16 +250,19 @@ pub type DraftDecisions = Vec<Option<Vec<Card>>>;
 /// far (a line is legal whatever the owners), then searched alone; after each
 /// round one search over all open drafts together may prove them all
 /// infeasible at once (or settle those its line completes). `progress` gets
-/// (feasible so far, still open). `Ok(None)` if cancelled.
+/// (feasible so far, still open); `decided` gets (draft index, decision) as
+/// each draft is settled. If cancelled, the drafts decided so far keep their
+/// answer and the rest are [`Decision::Open`].
 pub fn decide_drafts(
     s: &Situation,
     drafts: &[Vec<Owner>],
     opts: &Options,
     progress: Option<&dyn Fn(usize, usize)>,
-) -> Result<Option<DraftDecisions>, SolveError> {
+    decided: Option<&dyn Fn(usize, &Decision)>,
+) -> Result<DraftDecisions, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     if redeal(s).is_some() {
-        return Ok(Some(vec![None; drafts.len()]));
+        return Ok(vec![Decision::Fails; drafts.len()]);
     }
     let with_owners = |d: &[Owner]| {
         let mut x = s.clone();
@@ -271,7 +284,13 @@ pub fn decide_drafts(
     };
     let as_index = |d: &Vec<Owner>| -> Vec<u8> { d.iter().map(|o| if let Owner::Player(p) = o { *p } else { 0 }).collect() };
     let cancelled = || opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
-    let mut out: Vec<Option<Option<Vec<Card>>>> = vec![None; drafts.len()];
+    let mut out = vec![Decision::Open; drafts.len()];
+    let settle = |out: &mut DraftDecisions, i: usize, d: Decision| {
+        if let Some(f) = decided {
+            f(i, &d);
+        }
+        out[i] = d;
+    };
     let mut lines: Vec<Vec<Card>> = Vec::new();
     let mut open: Vec<usize> = (0..drafts.len()).collect();
     let mut found = 0;
@@ -284,22 +303,22 @@ pub fn decide_drafts(
                 f(found, open.len() - k + still.len());
             }
             if let Some(line) = lines.iter().find(|l| completes(&drafts[i], l)) {
-                out[i] = Some(Some(line.clone()));
+                settle(&mut out, i, Decision::Works(line.clone()));
                 found += 1;
                 continue;
             }
             match solve(&with_owners(&drafts[i]), &Options { node_limit: Some(budget), ..opts.clone() })?.0 {
                 Verdict::Feasible(line) => {
-                    out[i] = Some(Some(line.clone()));
+                    settle(&mut out, i, Decision::Works(line.clone()));
                     found += 1;
                     lines.push(line);
                 }
-                Verdict::Infeasible | Verdict::Redeal(_) => out[i] = Some(None),
+                Verdict::Infeasible | Verdict::Redeal(_) => settle(&mut out, i, Decision::Fails),
                 Verdict::Undecided => still.push(i),
-                Verdict::Cancelled => return Ok(None),
+                Verdict::Cancelled => return Ok(out),
             }
             if cancelled() {
-                return Ok(None);
+                return Ok(out);
             }
         }
         open = still;
@@ -312,7 +331,7 @@ pub fn decide_drafts(
         match run(g.clone(), model, &Options { node_limit: Some(budget), ..opts.clone() }).0 {
             Verdict::Infeasible => {
                 for &i in &open {
-                    out[i] = Some(None);
+                    settle(&mut out, i, Decision::Fails);
                 }
                 open.clear();
             }
@@ -320,19 +339,19 @@ pub fn decide_drafts(
                 open.retain(|&i| {
                     let done = completes(&drafts[i], &line);
                     if done {
-                        out[i] = Some(Some(line.clone()));
+                        settle(&mut out, i, Decision::Works(line.clone()));
                         found += 1;
                     }
                     !done
                 });
                 lines.push(line);
             }
-            Verdict::Cancelled => return Ok(None),
+            Verdict::Cancelled => return Ok(out),
             _ => {}
         }
         budget = budget.saturating_mul(2);
     }
-    Ok(Some(out.into_iter().map(|d| d.unwrap()).collect()))
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- model: tasks and possible owners
@@ -1619,7 +1638,7 @@ tasks:
                 drafts.push(o.to_vec());
                 true
             });
-            let decided = decide_drafts(&s, &drafts, &Options::default(), None).unwrap().unwrap();
+            let decided = decide_drafts(&s, &drafts, &Options::default(), None, None).unwrap();
             for (d, r) in drafts.iter().zip(&decided) {
                 let mut fixed = s.clone();
                 for (a, o) in fixed.tasks.iter_mut().zip(d) {
@@ -1627,16 +1646,67 @@ tasks:
                 }
                 let alone = solve(&fixed, &Options::plain()).unwrap().0;
                 match (r, &alone) {
-                    (Some(line), Verdict::Feasible(_)) => {
+                    (Decision::Works(line), Verdict::Feasible(_)) => {
                         check_line(&fixed, line);
                         feasible += 1;
                     }
-                    (None, Verdict::Infeasible) => infeasible += 1,
-                    _ => panic!("case {case} draft {d:?}: together {:?}, alone {alone:?}", r.is_some()),
+                    (Decision::Fails, Verdict::Infeasible) => infeasible += 1,
+                    _ => panic!("case {case} draft {d:?}: together {r:?}, alone {alone:?}"),
                 }
             }
         }
         assert!(feasible > 50 && infeasible > 50, "{feasible} {infeasible}");
+    }
+
+    /// A cancelled decision keeps the drafts decided before the cancel.
+    #[test]
+    fn cancelled_decide_drafts_keeps_decided_drafts() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(52);
+        let mut kept = 0;
+        for _ in 0..40 {
+            let s = random_open_situation(&mut rng, 4, 4, 3);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let g = s.game().unwrap();
+            let mut drafts = Vec::new();
+            crate::draft::for_each_draft(&s.tasks, 4, g.captain as usize, |o| {
+                drafts.push(o.to_vec());
+                true
+            });
+            let cancel = AtomicBool::new(false);
+            // Cancel as soon as half the drafts are decided.
+            let half = drafts.len() / 2;
+            let stop = |_: usize, open: usize| {
+                if open <= drafts.len() - half {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            };
+            let opts = Options { cancel: Some(&cancel), ..Options::default() };
+            let seen = std::cell::RefCell::new(Vec::new());
+            let note = |i: usize, d: &Decision| seen.borrow_mut().push((i, d.clone()));
+            let decided = decide_drafts(&s, &drafts, &opts, Some(&stop), Some(&note)).unwrap();
+            // Every settled draft was reported once, with its final answer.
+            let mut seen = seen.into_inner();
+            seen.sort_by_key(|x| x.0);
+            let settled: Vec<_> = decided.iter().cloned().enumerate().filter(|(_, d)| *d != Decision::Open).collect();
+            assert_eq!(seen, settled);
+            let all = decide_drafts(&s, &drafts, &Options::default(), None, None).unwrap();
+            assert!(!all.contains(&Decision::Open));
+            for (d, a) in decided.iter().zip(&all) {
+                match d {
+                    Decision::Open => {}
+                    Decision::Works(_) => assert!(matches!(a, Decision::Works(_))),
+                    Decision::Fails => assert_eq!(a, &Decision::Fails),
+                }
+            }
+            let done = decided.iter().filter(|d| **d != Decision::Open).count();
+            if done > 0 && done < drafts.len() {
+                kept += 1;
+            }
+        }
+        assert!(kept > 5, "{kept}");
     }
 
     /// Player1 holds S2 and S3; the only higher submarine elsewhere is S4, which
