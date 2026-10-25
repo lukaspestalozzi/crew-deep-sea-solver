@@ -25,6 +25,8 @@
 
   let running = $state(false);
   let cancelled = $state(false);
+  /** Last progress line, kept to show what was known when cancelled. */
+  let lastProgress = $state('');
   let progress = $state('');
   let error = $state<string | null>(null);
   let situation = $state<Situation | null>(null);
@@ -75,6 +77,7 @@
     client.cancel();
     running = true;
     cancelled = false;
+    lastProgress = '';
     error = null;
     progress = '';
     solveOut = drafts = altDrafts = null;
@@ -105,7 +108,7 @@
       return;
     }
     const nodes = (k: number) => (progress = i18n.t('positions', { n: (k / 1e6).toFixed(0) + 'M' }));
-    const draftProgress = (a: number, b: number) => (progress = i18n.t('draftsChecked', { a, b }));
+    const draftProgress = draftProgressFn;
     try {
       if (unknownOwners) {
         draftsOut = await client.call<SolveDraftsOut>('solve_drafts', [text], nodes);
@@ -143,6 +146,7 @@
   async function extra(f: () => Promise<void>) {
     running = true;
     cancelled = false;
+    lastProgress = '';
     try {
       await f();
     } catch (e) {
@@ -153,7 +157,11 @@
     progress = '';
   }
 
-  const draftProgressFn = (a: number, b: number) => (progress = i18n.t('draftsChecked', { a, b }));
+  // (checked, planned, working so far, drafts still open)
+  function draftProgressFn(a: number, b: number, w: number, open: number) {
+    progress = a < b ? i18n.t('draftsChecked', { a, b, w, n: open }) : i18n.t('draftsSettling', { w, n: open });
+    lastProgress = progress;
+  }
 
   /** Count the drafts that work (owners ?), or check all other drafts (owners fixed). */
   const countDrafts = () =>
@@ -178,9 +186,12 @@
   async function testDeals() {
     robustRunning = true;
     robustProgress = '';
+    cancelled = false;
+    lastProgress = '';
     try {
       robustness = await client.call('deal_robustness', [text, 100, Math.floor(Math.random() * 1e9)], (a, b) => {
         robustProgress = i18n.t('dealsTested', { a, b });
+        lastProgress = robustProgress;
       });
     } catch (e) {
       if (!(e instanceof Cancelled)) error = String(e instanceof Error ? e.message : e);
@@ -191,6 +202,7 @@
   function cancelDeals() {
     client.cancel();
     robustRunning = false;
+    cancelled = true;
   }
 
   // One entry per task: the players for whom it is impossible alone.
@@ -238,7 +250,7 @@
       <button class="btn small" onclick={cancel}>{i18n.t('cancel')}</button>
     </div>
   {:else if cancelled}
-    <div class="panel"><span class="muted">{i18n.t('cancelled')}</span></div>
+    <div class="panel"><span class="muted">{lastProgress ? i18n.t('cancelledAt', { state: lastProgress }) : i18n.t('cancelled')}</span></div>
   {/if}
 
   {#if situation && (drafts || altDrafts)}

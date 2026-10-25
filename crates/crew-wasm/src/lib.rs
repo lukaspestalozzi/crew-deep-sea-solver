@@ -335,15 +335,22 @@ pub fn solve_drafts_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
 #[wasm_bindgen]
 pub fn drafts(text: &str, all_drafts: bool, limit: u32, progress: JsValue) -> String {
     let cb = progress_fn(&progress);
-    let report = |done: u64, total: u64| {
+    // Called with (checked, planned, working so far, drafts still open).
+    let report = |checked: u64, planned: u64, working: u64, open: u64| {
         if let Some(f) = &cb {
-            let _ = f.call2(&JsValue::NULL, &JsValue::from_f64(done as f64), &JsValue::from_f64(total as f64));
+            let args = js_sys::Array::of4(
+                &JsValue::from_f64(checked as f64),
+                &JsValue::from_f64(planned as f64),
+                &JsValue::from_f64(working as f64),
+                &JsValue::from_f64(open as f64),
+            );
+            let _ = f.apply(&JsValue::NULL, &args);
         }
     };
     drafts_impl(text, all_drafts, limit, Some(&report))
 }
 
-pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&dyn Fn(u64, u64)>) -> String {
+pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&dyn Fn(u64, u64, u64, u64)>) -> String {
     let mut s = match situation(text) {
         Ok(s) => s,
         Err(e) => return err(e),
@@ -458,7 +465,7 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, progress: JsValue) -> 
         Err(e) => err(e),
         Ok(s) => {
             let cards: Vec<_> = s.tasks.iter().filter(|a| !a.card.is_rule()).map(|a| a.card).collect();
-            match analysis::deal_robustness(&cards, s.players(), deals as usize, Some(2_000_000), seed as u64, None, Some(&report)) {
+            match analysis::deal_robustness(&cards, s.players(), deals as usize, Some(2_000_000), true, seed as u64, None, Some(&report)) {
                 Some((good, undecided, total)) => ok(json!({ "solvable": good, "undecided": undecided, "deals": total })),
                 None => ok(Value::Null),
             }

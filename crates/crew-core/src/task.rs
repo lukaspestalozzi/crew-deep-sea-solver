@@ -755,6 +755,119 @@ pub fn any_final_counts(g: &Game, mut test: impl FnMut(&[u8]) -> bool) -> bool {
     rec(0, n, r - need, &mut f, &mut test)
 }
 
+/// What an open task still asks of its owner's card play, for the combined
+/// checks across tasks: cards the owner must still win, cards it must not
+/// win, sets of which it must win `k` more cards, and further tricks it must
+/// win or lose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Req {
+    pub need: CardSet,
+    pub avoid: CardSet,
+    pub demands: [(CardSet, u8); 4],
+    pub n_demands: usize,
+    pub more_wins: u8,
+    pub more_losses: u8,
+}
+
+impl Req {
+    fn demand(&mut self, set: CardSet, k: u8) {
+        if self.n_demands < self.demands.len() {
+            self.demands[self.n_demands] = (set, k);
+            self.n_demands += 1;
+        }
+    }
+
+    pub fn demands(&self) -> &[(CardSet, u8)] {
+        &self.demands[..self.n_demands]
+    }
+}
+
+impl Kind {
+    /// Requirements of this task for `owner`; only meaningful while it is open.
+    pub fn requirements(&self, g: &Game, owner: usize) -> Req {
+        let won = g.won[owner];
+        let unplayed = g.unplayed();
+        let mut r = Req::default();
+        let count = |r: &mut Req, set: CardSet, k: u8, exact: bool| {
+            let have = won.intersect(set).len() as u8;
+            if have < k {
+                r.demand(set.intersect(unplayed), k - have);
+            } else if exact {
+                r.avoid = r.avoid.union(set.intersect(unplayed));
+            }
+        };
+        match self {
+            Kind::WinCards(s) => r.need = s.minus(won).intersect(unplayed),
+            Kind::WinNone(s) => r.avoid = s.intersect(unplayed),
+            Kind::SuitCounts { counts, exact } => {
+                for &(su, k) in counts {
+                    count(&mut r, su.cards(), k, *exact);
+                }
+            }
+            Kind::ValueCount { value, n, exact } => count(&mut r, CardSet::colour_value(*value), *n, *exact),
+            Kind::OnlySub(v) => {
+                let target = Card::new(Suit::Sub, *v);
+                if !won.contains(target) {
+                    r.need = CardSet::single(target).intersect(unplayed);
+                }
+                r.avoid = Suit::Sub.cards().minus(CardSet::single(target)).intersect(unplayed);
+            }
+            Kind::NoneOfFirst(k) => r.more_losses = (*k as usize).saturating_sub(g.tricks.len()) as u8,
+            Kind::WinWith { .. } | Kind::Trick(_) => r.more_wins = 1,
+            _ => {}
+        }
+        r
+    }
+}
+
+/// Fewest tricks in which one player can collect `k` cards of `set`: each
+/// trick holds one card per player. `None` if fewer than `k` such cards are in hands.
+fn tricks_for(g: &Game, set: CardSet, k: u8) -> Option<u8> {
+    let mut per = [0u8; crate::game::MAX_PLAYERS];
+    for (h, x) in per.iter_mut().enumerate().take(g.n) {
+        *x = g.hands[h].intersect(set).len() as u8;
+    }
+    if per.iter().map(|&x| x as u32).sum::<u32>() < k as u32 {
+        return None;
+    }
+    (0..=g.tricks_left() as u8).find(|&m| per.iter().map(|&x| x.min(m) as u32).sum::<u32>() >= k as u32)
+}
+
+/// Bounds (lowest, highest) on player `p`'s final trick count implied by
+/// these requirements of its open tasks together, or `None` if they
+/// contradict each other or cannot be met:
+/// - cards `p` must win that one player holds go into different tricks, all won by `p`;
+/// - `k` more cards of a set need enough tricks (one card per player per trick);
+/// - cards in `p`'s own hand that `p` must not win go into tricks `p` loses
+///   (one card may stay unplayed when a hand has more cards than tricks left).
+pub fn req_bounds<'a>(g: &Game, p: usize, reqs: impl Iterator<Item = &'a Req>) -> Option<(u8, u8)> {
+    let r = g.tricks_left() as u8;
+    let (mut need, mut avoid, mut wins, mut losses) = (CardSet::EMPTY, CardSet::EMPTY, 0u8, 0u8);
+    for q in reqs {
+        need = need.union(q.need);
+        avoid = avoid.union(q.avoid);
+        wins = wins.max(q.more_wins);
+        losses = losses.max(q.more_losses);
+        for &(set, k) in q.demands() {
+            wins = wins.max(tricks_for(g, set, k)?);
+        }
+    }
+    if !need.intersect(avoid).is_empty() {
+        return None;
+    }
+    for h in 0..g.n {
+        wins = wins.max(g.hands[h].intersect(need).len() as u8);
+    }
+    let hand = g.hands[p];
+    let spare = (hand.len() as u8).saturating_sub(r);
+    losses = losses.max((hand.intersect(avoid).len() as u8).saturating_sub(spare));
+    let my = g.trick_counts[p];
+    if wins + losses > r {
+        return None;
+    }
+    Some((my + wins, my + r - losses))
+}
+
 pub fn top_subs_count(g: &Game, p: usize) -> u64 {
     top_subs(g, p).len() as u64
 }
@@ -783,11 +896,22 @@ fn top_subs(g: &Game, p: usize) -> CardSet {
 /// Necessary condition for `owner` to still win the trick holding unplayed card `c`.
 /// For a submarine held by someone else, the owner needs a higher submarine.
 fn can_capture(g: &Game, owner: usize, c: Card) -> bool {
-    if !c.is_sub() || g.hands[owner].contains(c) {
+    let hand = g.hands[owner];
+    if hand.contains(c) {
         return true;
     }
-    let higher = Suit::Sub.cards().iter().filter(|s| s.value() > c.value()).collect::<CardSet>();
-    !g.hands[owner].intersect(higher).is_empty()
+    let subs = Suit::Sub.cards();
+    if c.is_sub() {
+        let higher = subs.iter().filter(|s| s.value() > c.value()).collect::<CardSet>();
+        return !hand.intersect(higher).is_empty();
+    }
+    // A colour card of another player ends in a trick the owner wins: led or
+    // followed in its suit and beaten by a higher card of that suit or a
+    // submarine from the owner, or discarded into a trick of another suit the
+    // owner wins (which needs a card of another suit). The owner needs at
+    // least one of these cards.
+    let s = c.suit();
+    hand.iter().any(|x| x.is_sub() || x.suit() != s || x.value() > c.value())
 }
 
 fn won_tricks<'a>(g: &'a Game, owner: usize) -> impl Iterator<Item = &'a Trick> + 'a {

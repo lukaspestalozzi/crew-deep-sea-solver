@@ -14,7 +14,7 @@ use crate::card::{Card, CardSet, Suit};
 use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE};
 use crate::game::{Game, MAX_PLAYERS};
 use crate::situation::{Owner, Situation};
-use crate::task::{any_final_counts, merge, top_subs_count, Boundaries, Kind, Status, NO_BOUNDARIES};
+use crate::task::{any_final_counts, merge, req_bounds, top_subs_count, Boundaries, CountRule, Kind, Req, Status, NO_BOUNDARIES};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -215,10 +215,8 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
     } else {
         [0x1FF; 5]
     };
-    let has_count_rules = opts.count_check
-        && model.kinds.iter().any(|k| {
-            (0..g.n).any(|p| k.count_rule(&g, p).is_some()) || matches!(k, Kind::FirstWinnerAlwaysLeads)
-        });
+    // The combined check covers trick-count rules and card requirements alike.
+    let has_count_rules = opts.count_check;
     let mut search = Search {
         model,
         opts,
@@ -234,6 +232,8 @@ fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>
         zob: hands_zobrist(&g),
         decider: opts.decider,
         round_limit: None,
+        pairs_buf: Vec::new(),
+        settled_buf: Vec::new(),
     };
     let alive = search.model.alive0;
     let result = match opts.strategy {
@@ -401,6 +401,54 @@ impl Model {
 
 // ---------------------------------------------------------------- search
 
+/// Who may still win each card, from the requirements of tasks with a settled
+/// owner: false if two players must both win a card, a player must win a card
+/// it must not win, every player must avoid a card that has to be played, or
+/// a player must win more cards of a set than the others leave for it.
+fn destiny_ok(g: &Game, settled: &[(usize, Req)]) -> bool {
+    if settled.is_empty() {
+        return true;
+    }
+    let mut claim = [0u8; 40];
+    let mut forbid = [0u8; 40];
+    for &(p, ref r) in settled {
+        for c in r.need.iter() {
+            let i = c.index() as usize;
+            if claim[i] & !(1 << p) != 0 {
+                return false;
+            }
+            claim[i] |= 1 << p;
+        }
+        for c in r.avoid.iter() {
+            forbid[c.index() as usize] |= 1 << p;
+        }
+    }
+    let everyone = (1u8 << g.n) - 1;
+    let r = g.tricks_left() as u32;
+    for p in 0..g.n {
+        // Cards in a hand with more cards than tricks left may stay unplayed.
+        let must_play = g.hands[p].len() <= r;
+        for c in g.hands[p].iter() {
+            let i = c.index() as usize;
+            if claim[i] & forbid[i] != 0 || (must_play && forbid[i] == everyone) {
+                return false;
+            }
+        }
+    }
+    for &(p, ref r) in settled {
+        for &(set, k) in r.demands() {
+            let left = set.iter().filter(|c| {
+                let i = c.index() as usize;
+                claim[i] & !(1 << p) == 0 && forbid[i] & (1 << p) == 0
+            });
+            if (left.count() as u8) < k {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Zobrist hash of all hands.
 fn hands_zobrist(g: &Game) -> u128 {
     let mut z = 0;
@@ -475,7 +523,7 @@ struct Search<'o, 'a> {
     /// Where tasks tell cards of a suit apart.
     boundaries: Boundaries,
     has_count_rules: bool,
-    count_memo: HashMap<(u64, u128), bool, Fast>,
+    count_memo: HashMap<u128, bool, Fast>,
     draft_memo: HashMap<u128, bool, Fast>,
     failed: HashSet<u128, Fast>,
     stats: Stats,
@@ -490,6 +538,9 @@ struct Search<'o, 'a> {
     decider: &'o dyn MoveDecider,
     /// Node count at which the current restart stops.
     round_limit: Option<u64>,
+    /// Reused buffers of the combined check.
+    pairs_buf: Vec<(u128, Option<CountRule>, (u8, u8))>,
+    settled_buf: Vec<(usize, Req)>,
 }
 
 impl Search<'_, '_> {
@@ -528,41 +579,122 @@ impl Search<'_, '_> {
         (alive, done, Status::Open)
     }
 
-    /// Joint check of all trick-count rules: is there a final split of the
-    /// tricks under which some draft of surviving pairs keeps every rule?
-    /// Memoised by current counts, certain submarine wins, trick-1 winner and pairs.
-    fn counts_possible(&mut self, g: &Game, alive: u128) -> bool {
+    /// Combined check of all open tasks (needs `count_check`):
+    /// - each surviving pair's trick-count rule and the trick window its own
+    ///   card requirements imply ([`req_bounds`]); a pair whose window is
+    ///   empty cannot be in any working draft;
+    /// - for tasks whose owner is settled (fixed, or the only one left), the
+    ///   requirements of each player together, and who may still win each
+    ///   card ([`Search::destiny_ok`]);
+    /// - then: is there a final split of the tricks under which some draft of
+    ///   surviving pairs keeps every rule and window?
+    /// Memoised by everything the answer depends on.
+    fn counts_possible(&mut self, g: &Game, alive: u128, done: u128) -> bool {
+        let mut h = KeyHasher::new();
         let mut key: u64 = g.tricks.first().map_or(7, |t| t.winner as u64);
         for p in 0..g.n {
             key = key << 8 | (g.trick_counts[p] as u64) << 3 | top_subs_count(g, p);
         }
-        key = key << 4 | g.tricks_left() as u64;
-        if let Some(&ok) = self.count_memo.get(&(key, alive)) {
-            return ok;
-        }
-        let mut rules = Vec::new();
+        h.push(key << 4 | g.tricks_left() as u64);
+        let mut usable = alive;
+        let mut pairs = std::mem::take(&mut self.pairs_buf);
+        let mut settled = std::mem::take(&mut self.settled_buf);
+        pairs.clear();
+        settled.clear();
+        let ok = self.counts_possible_with(g, alive, done, &mut usable, &mut pairs, &mut settled, h);
+        self.pairs_buf = pairs;
+        self.settled_buf = settled;
+        ok
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn counts_possible_with(
+        &mut self,
+        g: &Game,
+        alive: u128,
+        done: u128,
+        usable: &mut u128,
+        pairs: &mut Vec<(u128, Option<CountRule>, (u8, u8))>,
+        settled: &mut Vec<(usize, Req)>,
+        mut h: KeyHasher,
+    ) -> bool {
         for t in 0..self.model.kinds.len() {
-            let ps = bits_of(alive, t);
+            let open = bits_of(alive & !done, t);
+            if open == 0 {
+                continue;
+            }
+            let k = self.model.kinds[t];
+            let is_settled = bits_of(done, t) == 0 && open.count_ones() == 1;
             for p in 0..g.n {
-                if ps & (1 << p) != 0 {
-                    if let Some(r) = self.model.kinds[t].count_rule(g, self.model.eval_owner(t, p)) {
-                        rules.push((bit(t, p), r));
-                    }
+                if open & (1 << p) == 0 {
+                    continue;
+                }
+                let owner = self.model.eval_owner(t, p);
+                let rule = k.count_rule(g, owner);
+                let global = self.model.slots[t] == Slot::Global;
+                let req = if global { Req::default() } else { k.requirements(g, p) };
+                // A settled task's requirements go into its player's combined
+                // window, which is at least as strict as its own.
+                let window = if global || is_settled || req == Req::default() {
+                    Some((0, u8::MAX))
+                } else {
+                    req_bounds(g, p, std::iter::once(&req))
+                };
+                let Some(window) = window else {
+                    *usable &= !bit(t, p);
+                    continue;
+                };
+                if rule.is_some() || window != (0, u8::MAX) {
+                    pairs.push((bit(t, p), rule, window));
+                }
+                if is_settled && !global && req != Req::default() {
+                    settled.push((p, req));
                 }
             }
         }
+        let mut windows = [(0u8, u8::MAX); MAX_PLAYERS];
+        for (p, w) in windows.iter_mut().enumerate().take(g.n) {
+            if !settled.iter().any(|(q, _)| *q == p) {
+                continue;
+            }
+            match req_bounds(g, p, settled.iter().filter(|(q, _)| *q == p).map(|(_, r)| r)) {
+                Some(b) => *w = b,
+                None => return false,
+            }
+        }
+        if !destiny_ok(g, settled) {
+            return false;
+        }
+        let usable = *usable;
+        h.push(usable as u64);
+        h.push((usable >> 64) as u64);
+        for w in &windows[..g.n] {
+            h.push((w.0 as u64) << 8 | w.1 as u64);
+        }
+        for &(b, _, w) in pairs.iter() {
+            h.push(b.trailing_zeros() as u64 | (w.0 as u64) << 8 | (w.1 as u64) << 16);
+        }
+        let memo_key = h.finish();
+        if let Some(&ok) = self.count_memo.get(&memo_key) {
+            return ok;
+        }
         let (model, memo) = (&self.model, &mut self.draft_memo);
-        let ok = rules.is_empty()
-            || any_final_counts(g, |f| {
-                let mut m = alive;
-                for &(b, r) in &rules {
-                    if !r.holds(f) {
+        let ok = model.draft_in(usable, memo)
+            && any_final_counts(g, |f| {
+                if (0..f.len()).any(|p| f[p] < windows[p].0 || f[p] > windows[p].1) {
+                    return false;
+                }
+                let mut m = usable;
+                for &(b, rule, w) in pairs.iter() {
+                    let pl = (b.trailing_zeros() % 5) as usize;
+                    let fits = rule.is_none_or(|r| r.holds(f)) && f[pl] >= w.0 && f[pl] <= w.1;
+                    if !fits {
                         m &= !b;
                     }
                 }
                 model.draft_in(m, memo)
             });
-        self.count_memo.insert((key, alive), ok);
+        self.count_memo.insert(memo_key, ok);
         ok
     }
 
@@ -722,7 +854,7 @@ impl Search<'_, '_> {
             }
             Status::Open => {}
         }
-        if self.has_count_rules && !self.counts_possible(g, alive) {
+        if self.has_count_rules && !self.counts_possible(g, alive, done) {
             return Err(false);
         }
         let mut key = None;
@@ -1225,5 +1357,50 @@ tasks:
             }
         }
         assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
+    }
+
+    /// The combined checks (trick windows from card requirements, card
+    /// destiny) must never prune a position that has a winning line.
+    #[test]
+    fn combined_checks_are_sound() {
+        use crate::catalogue::catalogue;
+        use crate::rng::Rng;
+        let mut rng = Rng::new(97);
+        let pool: Vec<_> = catalogue().iter().filter(|t| !t.is_rule()).collect();
+        let (mut feasible, mut infeasible, mut pruned) = (0, 0, 0);
+        for case in 0..300 {
+            let n = 3 + case % 3;
+            let mut g = Game::new(&Game::random_hands(n, &mut rng)).unwrap();
+            let left = if n == 5 { 5 } else { 6 };
+            while g.tricks_left() > left || !g.current.is_empty() {
+                let moves: Vec<Card> = g.legal_moves().iter().collect();
+                g.play(moves[rng.below(moves.len())]);
+            }
+            let k = 2 + rng.below(3);
+            let tasks: Resolved = (0..k)
+                .map(|_| {
+                    let t = pool[rng.below(pool.len())];
+                    let mut o = rng.below(n);
+                    if !t.captain_allowed() && o == g.captain as usize {
+                        o = (o + 1) % n;
+                    }
+                    (&t.kind, o)
+                })
+                .collect();
+            let with = solve_game(g.clone(), &tasks, &Options { strategy: Strategy::Dfs, ..Options::default() });
+            let without = solve_game(g.clone(), &tasks, &Options { count_check: false, strategy: Strategy::Dfs, ..Options::default() });
+            match (&with.0, &without.0) {
+                (Verdict::Feasible(_), Verdict::Feasible(_)) => feasible += 1,
+                (Verdict::Infeasible, Verdict::Infeasible) => {
+                    infeasible += 1;
+                    if with.1.nodes < without.1.nodes {
+                        pruned += 1;
+                    }
+                }
+                _ => panic!("case {case}: with checks {:?}, without {:?}; tasks {tasks:?}", with.0, without.0),
+            }
+        }
+        assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
+        assert!(pruned > 10, "the checks should cut some proofs short: {pruned}");
     }
 }
