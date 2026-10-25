@@ -11,7 +11,7 @@
 //! orders the moves, and the [`Strategy`] (depth-first or best-first).
 
 use crate::card::{Card, CardSet, Suit};
-use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE, TASK_AWARE_RANDOM};
+use crate::decider::{MoveDecider, Position, DECK_ORDER, LOOKAHEAD, TASK_AWARE, TASK_AWARE_RANDOM};
 use crate::game::{Game, MAX_PLAYERS};
 use crate::situation::{Owner, Situation};
 use crate::task::{any_final_counts, merge, req_bounds, top_subs_count, Boundaries, CountRule, Kind, Req, Status, NO_BOUNDARIES};
@@ -1124,8 +1124,8 @@ impl Search<'_, '_> {
         let mut budget = first_budget.max(1);
         let mut round = 0;
         loop {
-            let deciders: [&dyn MoveDecider; 3] =
-                [self.opts.decider, &DECK_ORDER, &TASK_AWARE_RANDOM[round % TASK_AWARE_RANDOM.len()]];
+            let deciders: [&dyn MoveDecider; 4] =
+                [self.opts.decider, &LOOKAHEAD, &DECK_ORDER, &TASK_AWARE_RANDOM[round % TASK_AWARE_RANDOM.len()]];
             round += 1;
             for &d in &deciders {
                 self.decider = d;
