@@ -29,7 +29,7 @@ Player1: first-trick
 
   let text = $state(initial());
   let analysed = $state<string | null>(null);
-  let checkAll = $state(true);
+  let checkAll = $state(false);
 
   const status = $derived.by(() => {
     const r = check(text);

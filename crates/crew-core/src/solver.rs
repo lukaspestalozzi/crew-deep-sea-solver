@@ -1,14 +1,21 @@
 //! Perfect-information feasibility search.
 //!
-//! Depth-first over legal plays. A branch stops as soon as a task fails, and
-//! succeeds as soon as every task is done. Positions between tricks that were
-//! proven lost are cached by (remaining hands, leader, task signatures).
+//! The search runs over plays. Between tricks every task is evaluated for
+//! every player who may still own it (a *pair*). With fixed owners each task
+//! has one pair. With unknown owners (`?`) one search covers all legal drafts:
+//! a branch is lost once no complete draft survives, and won once some draft
+//! has all its tasks done. Positions proven lost are cached by (remaining
+//! hands, leader, surviving pairs and their task signatures).
+//!
+//! Two parts are pluggable through [`Options`]: the [`MoveDecider`] that
+//! orders the moves, and the [`Strategy`] (depth-first or best-first).
 
 use crate::card::{Card, CardSet, Suit};
-use crate::game::Game;
+use crate::decider::{MoveDecider, Position, DECK_ORDER, TASK_AWARE};
+use crate::game::{Game, MAX_PLAYERS};
 use crate::situation::{Owner, Situation};
-use crate::task::{counts_possible, merge, top_subs_count, Boundaries, CountRule, Kind, Status, NO_BOUNDARIES};
-use std::collections::{HashMap, HashSet};
+use crate::task::{any_final_counts, merge, top_subs_count, Boundaries, Kind, Status, NO_BOUNDARIES};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,7 +26,10 @@ pub enum Verdict {
     Infeasible,
     /// A task's re-deal clause applies to this deal.
     Redeal(String),
+    /// Stopped through the cancel flag.
     Cancelled,
+    /// Stopped at the node limit without an answer.
+    Undecided,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +58,18 @@ pub struct Stats {
     pub cache_size: usize,
 }
 
+/// How the search space is explored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// Depth-first in the decider's move order. Little memory; needed to
+    /// prove infeasibility efficiently.
+    Dfs,
+    /// Best-first over positions between tricks, most tasks done and deepest
+    /// first. Keeps every open position in memory; falls back to depth-first
+    /// once more than `max_positions` positions were generated.
+    BestFirst { max_positions: usize },
+}
+
 #[derive(Clone)]
 pub struct Options<'a> {
     /// Cache positions proven lost.
@@ -59,18 +81,35 @@ pub struct Options<'a> {
     pub cancel: Option<&'a AtomicBool>,
     /// Called with the node count about every million nodes.
     pub progress: Option<&'a dyn Fn(u64)>,
+    /// Orders the moves at every node.
+    pub decider: &'a dyn MoveDecider,
+    pub strategy: Strategy,
+    /// At most this many lost positions are kept; the cache is emptied when full.
+    pub cache_limit: usize,
+    /// Stop with [`Verdict::Undecided`] after this many nodes.
+    pub node_limit: Option<u64>,
 }
 
 impl Default for Options<'_> {
     fn default() -> Self {
-        Options { use_cache: true, merge_cards: true, count_check: true, cancel: None, progress: None }
+        Options {
+            use_cache: true,
+            merge_cards: true,
+            count_check: true,
+            cancel: None,
+            progress: None,
+            decider: &TASK_AWARE,
+            strategy: Strategy::Dfs,
+            cache_limit: 4_000_000,
+            node_limit: None,
+        }
     }
 }
 
 impl Options<'_> {
-    /// No cache, no merging, no joint count check: the reference search.
+    /// No cache, no merging, no joint count check, deck order: the reference search.
     pub fn plain() -> Self {
-        Options { use_cache: false, merge_cards: false, count_check: false, cancel: None, progress: None }
+        Options { use_cache: false, merge_cards: false, count_check: false, decider: &DECK_ORDER, ..Options::default() }
     }
 }
 
@@ -100,6 +139,7 @@ pub fn redeal(s: &Situation) -> Option<String> {
     s.tasks.iter().find(|a| a.card.redeal_triggered(&s.hands)).map(|a| a.card.id.clone())
 }
 
+/// Feasibility with every owner fixed.
 pub fn solve(s: &Situation, opts: &Options) -> Result<(Verdict, Stats), SolveError> {
     let (g, tasks) = prepare(s)?;
     if let Some(id) = redeal(s) {
@@ -108,47 +148,32 @@ pub fn solve(s: &Situation, opts: &Options) -> Result<(Verdict, Stats), SolveErr
     Ok(solve_game(g, &tasks, opts))
 }
 
-pub fn solve_game(mut g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, Stats) {
-    let boundaries = if opts.merge_cards {
-        tasks.iter().fold(NO_BOUNDARIES, |acc, (k, _)| merge(acc, k.boundaries()))
-    } else {
-        [0x1FF; 5]
-    };
-    let mut search = Search {
-        tasks,
-        opts,
-        boundaries,
-        statuses: Vec::with_capacity(tasks.len()),
-        // Rule M23 only yields its rule after trick 1, so probe a finished game shape.
-        has_count_rules: opts.count_check
-            && tasks.iter().any(|&(k, o)| k.count_rule(&g, o).is_some() || matches!(k, Kind::FirstWinnerAlwaysLeads)),
-        count_memo: HashMap::new(),
-        failed: HashSet::new(),
-        stats: Stats::default(),
-        line: Vec::new(),
-    };
-    let verdict = match search.dfs(&mut g) {
-        None => Verdict::Cancelled,
-        Some(true) => Verdict::Feasible(search.line),
-        Some(false) => Verdict::Infeasible,
-    };
-    search.stats.cache_size = search.failed.len();
-    (verdict, search.stats)
+pub fn solve_game(g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, Stats) {
+    let (v, _, stats) = run(g, Model::fixed(tasks), opts);
+    (v, stats)
 }
 
-/// Combined status of all tasks (between tricks).
+/// Feasibility over every legal draft of the `?` tasks, in one search. On
+/// success also returns the owners of a working draft (one per task).
+pub fn solve_drafts(s: &Situation, opts: &Options) -> Result<(Verdict, Option<Vec<Owner>>, Stats), SolveError> {
+    let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
+    for a in &s.tasks {
+        if a.owner == Owner::Player(g.captain) && !a.card.captain_allowed() {
+            return Err(SolveError::CaptainNotAllowed(a.card.id.clone()));
+        }
+    }
+    if let Some(id) = redeal(s) {
+        return Ok((Verdict::Redeal(id), None, Stats::default()));
+    }
+    let model = Model::drafts(s, &g);
+    Ok(run(g, model, opts))
+}
+
+/// Combined status of all tasks (between tricks), owners fixed.
 pub fn status(g: &Game, tasks: &Resolved) -> Status {
-    status_into(g, tasks, &mut Vec::new())
-}
-
-/// As [`status`], also recording each task's status (stops at the first failure).
-fn status_into(g: &Game, tasks: &Resolved, out: &mut Vec<Status>) -> Status {
-    out.clear();
     let mut all_done = true;
     for &(k, o) in tasks {
-        let st = k.eval(g, o);
-        out.push(st);
-        match st {
+        match k.eval(g, o) {
             Status::Failed => return Status::Failed,
             Status::Open => all_done = false,
             Status::Done => {}
@@ -157,7 +182,6 @@ fn status_into(g: &Game, tasks: &Resolved, out: &mut Vec<Status>) -> Status {
     if all_done {
         Status::Done
     } else if g.is_over() {
-        // Every task is exact at the end; reaching here means a task bug.
         debug_assert!(false, "open task at game end");
         Status::Failed
     } else {
@@ -165,45 +189,299 @@ fn status_into(g: &Game, tasks: &Resolved, out: &mut Vec<Status>) -> Status {
     }
 }
 
-/// Two independent 64-bit multiply-rotate hashes; a collision of both is
-/// negligible (about 2^-128 per pair).
-fn key_hash(words: impl Iterator<Item = u64>) -> u128 {
-    let (mut a, mut b) = (0x243F_6A88_85A3_08D3u64, 0x1319_8A2E_0370_7344u64);
-    for w in words {
-        a = (a.rotate_left(5) ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        b = (b.rotate_left(7) ^ w).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    }
-    (a as u128) << 64 | b as u128
+fn run(mut g: Game, model: Model, opts: &Options) -> (Verdict, Option<Vec<Owner>>, Stats) {
+    let boundaries = if opts.merge_cards {
+        model.kinds.iter().fold(NO_BOUNDARIES, |acc, k| merge(acc, k.boundaries()))
+    } else {
+        [0x1FF; 5]
+    };
+    let has_count_rules = opts.count_check
+        && model.kinds.iter().any(|k| {
+            (0..g.n).any(|p| k.count_rule(&g, p).is_some()) || matches!(k, Kind::FirstWinnerAlwaysLeads)
+        });
+    let mut search = Search {
+        model,
+        opts,
+        boundaries,
+        has_count_rules,
+        count_memo: HashMap::new(),
+        draft_memo: HashMap::new(),
+        failed: HashSet::new(),
+        stats: Stats::default(),
+        line: Vec::new(),
+        won: 0,
+        stopped: None,
+    };
+    let alive = search.model.alive0;
+    let result = match opts.strategy {
+        Strategy::Dfs => search.dfs(&mut g, alive, 0),
+        Strategy::BestFirst { max_positions } => match search.best_first(&g, alive, max_positions) {
+            Some(r) => r,
+            None => {
+                search.line.clear();
+                search.dfs(&mut g, alive, 0)
+            }
+        },
+    };
+    let verdict = match result {
+        Some(true) => Verdict::Feasible(std::mem::take(&mut search.line)),
+        Some(false) => Verdict::Infeasible,
+        None => search.stopped.clone().unwrap_or(Verdict::Cancelled),
+    };
+    let owners = matches!(verdict, Verdict::Feasible(_)).then(|| search.model.owners_of(search.won));
+    search.stats.cache_size = search.failed.len();
+    (verdict, owners, search.stats)
 }
 
-struct Search<'a, 'o> {
-    tasks: &'a Resolved,
-    opts: &'a Options<'o>,
+// ---------------------------------------------------------------- model: tasks and possible owners
+
+const fn bit(t: usize, p: usize) -> u128 {
+    1u128 << (5 * t + p)
+}
+
+fn bits_of(mask: u128, t: usize) -> u8 {
+    (mask >> (5 * t)) as u8 & 0x1F
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Rule card: applies to the crew (evaluated as player 0).
+    Global,
+    /// Owner fixed (one pair).
+    Fixed,
+    /// Owner open: any surviving pair, subject to the draft rule.
+    Open,
+}
+
+struct Model {
+    kinds: Vec<&'static Kind>,
+    slots: Vec<Slot>,
+    /// Initially possible pairs.
+    alive0: u128,
+    /// Seats left per player for the open tasks; `None`: no legal draft.
+    caps: Option<[u8; MAX_PLAYERS]>,
+    open: Vec<usize>,
+}
+
+impl Model {
+    fn fixed(tasks: &Resolved) -> Model {
+        assert!(tasks.len() <= 25, "at most 25 tasks");
+        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: Some([0; MAX_PLAYERS]), open: Vec::new() };
+        for (t, &(k, o)) in tasks.iter().enumerate() {
+            m.kinds.push(k);
+            m.slots.push(if k.is_rule() { Slot::Global } else { Slot::Fixed });
+            m.alive0 |= bit(t, if k.is_rule() { 0 } else { o });
+        }
+        m
+    }
+
+    fn drafts(s: &Situation, g: &Game) -> Model {
+        assert!(s.tasks.len() <= 25, "at most 25 tasks");
+        let mut m = Model { kinds: Vec::new(), slots: Vec::new(), alive0: 0, caps: None, open: Vec::new() };
+        for (t, a) in s.tasks.iter().enumerate() {
+            m.kinds.push(&a.card.kind);
+            match a.owner {
+                Owner::Crew => {
+                    m.slots.push(Slot::Global);
+                    m.alive0 |= bit(t, 0);
+                }
+                Owner::Player(p) => {
+                    m.slots.push(Slot::Fixed);
+                    m.alive0 |= bit(t, p as usize);
+                }
+                Owner::Unknown => {
+                    m.slots.push(Slot::Open);
+                    m.open.push(t);
+                    for p in 0..g.n {
+                        if p != g.captain as usize || a.card.captain_allowed() {
+                            m.alive0 |= bit(t, p);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(c) = crate::draft::capacities(&s.tasks, g.n, g.captain as usize) {
+            let mut caps = [0u8; MAX_PLAYERS];
+            for (p, &k) in c.iter().enumerate() {
+                caps[p] = k as u8;
+            }
+            m.caps = Some(caps);
+        }
+        m
+    }
+
+    /// Give each open task, from the k-th on, a player of `mask` with a free seat.
+    fn assign(&self, k: usize, mask: u128, caps: &mut [u8; MAX_PLAYERS], out: &mut [u8]) -> bool {
+        let Some(&t) = self.open.get(k) else { return true };
+        let options = bits_of(mask, t);
+        for p in 0..MAX_PLAYERS {
+            if options & (1 << p) != 0 && caps[p] > 0 {
+                caps[p] -= 1;
+                out[t] = p as u8;
+                let ok = self.assign(k + 1, mask, caps, out);
+                caps[p] += 1;
+                if ok {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Is there a complete legal draft using only pairs in `mask`?
+    fn draft_in(&self, mask: u128, memo: &mut HashMap<u128, bool>) -> bool {
+        let Some(caps) = self.caps else { return false };
+        for (t, s) in self.slots.iter().enumerate() {
+            if *s != Slot::Open && bits_of(mask, t) == 0 {
+                return false;
+            }
+        }
+        if self.open.is_empty() {
+            return true;
+        }
+        if let Some(&ok) = memo.get(&mask) {
+            return ok;
+        }
+        let mut out = vec![0u8; self.slots.len()];
+        let mut free = caps;
+        let ok = self.assign(0, mask, &mut free, &mut out);
+        memo.insert(mask, ok);
+        ok
+    }
+
+    /// Owners of a complete draft within `mask` (which must have one).
+    fn owners_of(&self, mask: u128) -> Vec<Owner> {
+        let mut out = vec![0u8; self.slots.len()];
+        let mut caps = self.caps.unwrap_or([0; MAX_PLAYERS]);
+        self.assign(0, mask, &mut caps, &mut out);
+        self.slots
+            .iter()
+            .enumerate()
+            .map(|(t, s)| match s {
+                Slot::Global => Owner::Crew,
+                Slot::Fixed => Owner::Player(bits_of(mask, t).trailing_zeros() as u8),
+                Slot::Open => Owner::Player(out[t]),
+            })
+            .collect()
+    }
+
+    /// Player a pair stands for when evaluating its task.
+    fn eval_owner(&self, t: usize, p: usize) -> usize {
+        if self.slots[t] == Slot::Global {
+            0
+        } else {
+            p
+        }
+    }
+}
+
+// ---------------------------------------------------------------- search
+
+/// Two independent 64-bit multiply-rotate hashes; a collision of both is
+/// negligible (about 2^-128 per pair).
+struct KeyHasher(u64, u64);
+
+impl KeyHasher {
+    fn new() -> Self {
+        KeyHasher(0x243F_6A88_85A3_08D3, 0x1319_8A2E_0370_7344)
+    }
+    fn push(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.1 = (self.1.rotate_left(7) ^ w).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    }
+    fn finish(&self) -> u128 {
+        (self.0 as u128) << 64 | self.1 as u128
+    }
+}
+
+struct Search<'o, 'a> {
+    model: Model,
+    opts: &'o Options<'a>,
     /// Where tasks tell cards of a suit apart.
     boundaries: Boundaries,
-    statuses: Vec<Status>,
     has_count_rules: bool,
-    count_memo: HashMap<u64, bool>,
+    count_memo: HashMap<(u64, u128), bool>,
+    draft_memo: HashMap<u128, bool>,
     failed: HashSet<u128>,
     stats: Stats,
     line: Vec<Card>,
+    /// Done pairs of the winning position.
+    won: u128,
+    /// Why the search stopped early (cancel or node limit).
+    stopped: Option<Verdict>,
 }
 
 impl Search<'_, '_> {
-    /// Joint check of all trick-count rules, memoised by current counts,
-    /// guaranteed submarine wins and the trick-1 winner.
-    fn counts_possible(&mut self, g: &Game) -> bool {
+    /// Evaluate every surviving pair between tricks. Returns the updated
+    /// (alive, done) pairs and the combined status.
+    fn evaluate(&mut self, g: &Game, mut alive: u128, mut done: u128) -> (u128, u128, Status) {
+        for t in 0..self.model.kinds.len() {
+            let open = bits_of(alive & !done, t);
+            if open != 0 {
+                let k = self.model.kinds[t];
+                for p in 0..g.n {
+                    if open & (1 << p) == 0 {
+                        continue;
+                    }
+                    match k.eval(g, self.model.eval_owner(t, p)) {
+                        Status::Failed => alive &= !bit(t, p),
+                        Status::Done => done |= bit(t, p),
+                        Status::Open => {}
+                    }
+                }
+            }
+            if bits_of(alive, t) == 0 {
+                return (alive, done, Status::Failed);
+            }
+        }
+        if !self.model.draft_in(alive, &mut self.draft_memo) {
+            return (alive, done, Status::Failed);
+        }
+        if self.model.draft_in(done, &mut self.draft_memo) {
+            return (alive, done, Status::Done);
+        }
+        if g.is_over() {
+            debug_assert!(false, "open task at game end");
+            return (alive, done, Status::Failed);
+        }
+        (alive, done, Status::Open)
+    }
+
+    /// Joint check of all trick-count rules: is there a final split of the
+    /// tricks under which some draft of surviving pairs keeps every rule?
+    /// Memoised by current counts, certain submarine wins, trick-1 winner and pairs.
+    fn counts_possible(&mut self, g: &Game, alive: u128) -> bool {
         let mut key: u64 = g.tricks.first().map_or(7, |t| t.winner as u64);
         for p in 0..g.n {
             key = key << 8 | (g.trick_counts[p] as u64) << 3 | top_subs_count(g, p);
         }
         key = key << 4 | g.tricks_left() as u64;
-        if let Some(&ok) = self.count_memo.get(&key) {
+        if let Some(&ok) = self.count_memo.get(&(key, alive)) {
             return ok;
         }
-        let rules: Vec<CountRule> = self.tasks.iter().filter_map(|&(k, o)| k.count_rule(g, o)).collect();
-        let ok = counts_possible(g, &rules);
-        self.count_memo.insert(key, ok);
+        let mut rules = Vec::new();
+        for t in 0..self.model.kinds.len() {
+            let ps = bits_of(alive, t);
+            for p in 0..g.n {
+                if ps & (1 << p) != 0 {
+                    if let Some(r) = self.model.kinds[t].count_rule(g, self.model.eval_owner(t, p)) {
+                        rules.push((bit(t, p), r));
+                    }
+                }
+            }
+        }
+        let (model, memo) = (&self.model, &mut self.draft_memo);
+        let ok = rules.is_empty()
+            || any_final_counts(g, |f| {
+                let mut m = alive;
+                for &(b, r) in &rules {
+                    if !r.holds(f) {
+                        m &= !b;
+                    }
+                }
+                model.draft_in(m, memo)
+            });
+        self.count_memo.insert((key, alive), ok);
         ok
     }
 
@@ -215,14 +493,9 @@ impl Search<'_, '_> {
     /// suit, the owners of the remaining cards from high to low, each with
     /// its class (how many task boundaries lie above it). Positions that
     /// differ only in which interchangeable cards are gone play out
-    /// identically, so they share a key. Needs `self.statuses` to be current.
-    fn key(&self, g: &Game) -> u128 {
-        let mut words = [0u64; 32];
-        let mut len = 0;
-        let mut push = |w: u64| {
-            words[len] = w;
-            len += 1;
-        };
+    /// identically, so they share a key.
+    fn key(&self, g: &Game, alive: u128, done: u128) -> u128 {
+        let mut h = KeyHasher::new();
         let mut owner = [0u8; 40];
         for p in 0..g.n {
             for c in g.hands[p].iter() {
@@ -242,13 +515,23 @@ impl Search<'_, '_> {
                     w = w << 7 | o << 4 | class;
                 }
             }
-            push(w);
+            h.push(w);
         }
-        push(g.leader as u64);
-        for (i, &(k, o)) in self.tasks.iter().enumerate() {
-            push(k.signature(g, o, self.statuses[i]));
+        h.push(g.leader as u64);
+        h.push(alive as u64);
+        h.push((alive >> 64) as u64);
+        h.push(done as u64);
+        h.push((done >> 64) as u64);
+        let open = alive & !done;
+        for (t, k) in self.model.kinds.iter().enumerate() {
+            let ps = bits_of(open, t);
+            for p in 0..g.n {
+                if ps & (1 << p) != 0 {
+                    h.push(k.signature(g, self.model.eval_owner(t, p), Status::Open));
+                }
+            }
         }
-        key_hash(words[..len].iter().copied())
+        h.finish()
     }
 
     /// Legal moves with interchangeable cards collapsed to one representative.
@@ -284,14 +567,29 @@ impl Search<'_, '_> {
         out
     }
 
-    /// Some(true) = winning line found (in `self.line`), Some(false) = lost, None = cancelled.
-    fn dfs(&mut self, g: &mut Game) -> Option<bool> {
+    /// Moves in the decider's order, in `buf`; returns how many.
+    fn ordered_moves(&self, g: &Game, alive: u128, done: u128, buf: &mut [Card; 14]) -> usize {
+        let mut k = 0;
+        for c in self.moves(g).iter() {
+            buf[k] = c;
+            k += 1;
+        }
+        let pos = Position { game: g, kinds: &self.model.kinds, alive, done };
+        self.opts.decider.order(&pos, &mut buf[..k]);
+        k
+    }
+
+    /// Count a node; false if the search must stop (cancel or node limit).
+    fn tick(&mut self) -> bool {
         self.stats.nodes += 1;
         if self.stats.nodes & 0xFFF == 0 {
-            if let Some(c) = self.opts.cancel {
-                if c.load(Ordering::Relaxed) {
-                    return None;
-                }
+            if self.opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                self.stopped = Some(Verdict::Cancelled);
+                return false;
+            }
+            if self.opts.node_limit.is_some_and(|l| self.stats.nodes >= l) {
+                self.stopped = Some(Verdict::Undecided);
+                return false;
             }
             if self.stats.nodes & 0xF_FFFF == 0 {
                 if let Some(p) = self.opts.progress {
@@ -299,32 +597,61 @@ impl Search<'_, '_> {
                 }
             }
         }
+        true
+    }
+
+    /// Between tricks: evaluate, count check and cache lookup. `Err(result)`
+    /// ends this branch; `Ok` gives the updated pairs and the cache key.
+    fn boundary(&mut self, g: &Game, alive: u128, done: u128) -> Result<(u128, u128, Option<u128>), bool> {
+        let (alive, done, st) = self.evaluate(g, alive, done);
+        match st {
+            Status::Failed => return Err(false),
+            Status::Done => {
+                self.won = done;
+                return Err(true);
+            }
+            Status::Open => {}
+        }
+        if self.has_count_rules && !self.counts_possible(g, alive) {
+            return Err(false);
+        }
+        let mut key = None;
+        if self.opts.use_cache {
+            let k = self.key(g, alive, done);
+            if self.failed.contains(&k) {
+                self.stats.cache_hits += 1;
+                return Err(false);
+            }
+            key = Some(k);
+        }
+        Ok((alive, done, key))
+    }
+
+    fn remember_lost(&mut self, key: u128) {
+        if self.failed.len() >= self.opts.cache_limit {
+            self.failed.clear();
+        }
+        self.failed.insert(key);
+    }
+
+    /// Some(true) = winning line found (in `self.line`), Some(false) = lost, None = stopped.
+    fn dfs(&mut self, g: &mut Game, mut alive: u128, mut done: u128) -> Option<bool> {
+        if !self.tick() {
+            return None;
+        }
         let mut key = None;
         if g.current.is_empty() {
-            let mut statuses = std::mem::take(&mut self.statuses);
-            let st = status_into(g, self.tasks, &mut statuses);
-            self.statuses = statuses;
-            match st {
-                Status::Failed => return Some(false),
-                Status::Done => return Some(true),
-                Status::Open => {}
-            }
-            if self.has_count_rules && !self.counts_possible(g) {
-                return Some(false);
-            }
-            if self.opts.use_cache {
-                let k = self.key(g);
-                if self.failed.contains(&k) {
-                    self.stats.cache_hits += 1;
-                    return Some(false);
-                }
-                key = Some(k);
+            match self.boundary(g, alive, done) {
+                Err(r) => return Some(r),
+                Ok((a, d, k)) => (alive, done, key) = (a, d, k),
             }
         }
-        for card in self.moves(g).iter() {
+        let mut buf = [Card::from_index(0); 14];
+        let k = self.ordered_moves(g, alive, done, &mut buf);
+        for &card in &buf[..k] {
             g.play(card);
             self.line.push(card);
-            let r = self.dfs(g);
+            let r = self.dfs(g, alive, done);
             if r != Some(false) {
                 if r.is_none() {
                     g.undo();
@@ -335,9 +662,112 @@ impl Search<'_, '_> {
             g.undo();
         }
         if let Some(k) = key {
-            self.failed.insert(k);
+            self.remember_lost(k);
         }
         Some(false)
+    }
+
+    /// Best-first over positions between tricks. `None` if more than
+    /// `max_positions` were generated (the caller falls back to depth-first).
+    fn best_first(&mut self, root: &Game, alive: u128, max_positions: usize) -> Option<Option<bool>> {
+        struct Node {
+            parent: usize,
+            /// Cards played from the parent to reach this position.
+            cards: Vec<Card>,
+        }
+        let mut nodes = vec![Node { parent: usize::MAX, cards: Vec::new() }];
+        let mut states: Vec<Option<(Game, u128, u128)>> = vec![None];
+        let mut heap = BinaryHeap::new();
+        let mut seen = HashSet::new();
+        let line_to = |nodes: &Vec<Node>, mut i: usize, last: &[Card]| {
+            let mut parts = vec![last.to_vec()];
+            while i != usize::MAX {
+                parts.push(nodes[i].cards.clone());
+                i = nodes[i].parent;
+            }
+            parts.into_iter().rev().flatten().collect::<Vec<Card>>()
+        };
+        // The root may be in the middle of a trick; it is expanded like any node.
+        let (mut a0, mut d0) = (alive, 0);
+        if root.current.is_empty() {
+            match self.boundary(root, a0, d0) {
+                Err(r) => return Some(Some(r)),
+                Ok((a, d, _)) => (a0, d0) = (a, d),
+            }
+        }
+        states[0] = Some((root.clone(), a0, d0));
+        heap.push((0u32, 0usize));
+        while let Some((_, i)) = heap.pop() {
+            let (mut g, a, d) = states[i].take().unwrap();
+            // Every way to finish the trick in progress, depth-first.
+            let mut children: Vec<(Vec<Card>, Game, u128, u128)> = Vec::new();
+            let mut path = Vec::new();
+            let mut found: Option<Vec<Card>> = None;
+            let ok = self.expand(&mut g, a, d, &mut path, &mut children, &mut found);
+            if !ok {
+                return Some(None);
+            }
+            if let Some(last) = found {
+                self.line = line_to(&nodes, i, &last);
+                return Some(Some(true));
+            }
+            for (cards, child, ca, cd) in children {
+                let key = self.key(&child, ca, cd);
+                if !seen.insert(key) || self.failed.contains(&key) {
+                    continue;
+                }
+                let tasks_done = (0..self.model.kinds.len()).filter(|&t| bits_of(cd, t) != 0).count() as u32;
+                let prio = tasks_done * 64 + child.tricks.len() as u32;
+                nodes.push(Node { parent: i, cards });
+                states.push(Some((child, ca, cd)));
+                heap.push((prio, nodes.len() - 1));
+                if nodes.len() > max_positions {
+                    return None;
+                }
+            }
+        }
+        Some(Some(false))
+    }
+
+    /// Play out the trick in progress in every way (merged moves); collect the
+    /// open positions after it, or stop at a won one (`found`). False if stopped.
+    fn expand(
+        &mut self,
+        g: &mut Game,
+        alive: u128,
+        done: u128,
+        path: &mut Vec<Card>,
+        out: &mut Vec<(Vec<Card>, Game, u128, u128)>,
+        found: &mut Option<Vec<Card>>,
+    ) -> bool {
+        let mut buf = [Card::from_index(0); 14];
+        let k = self.ordered_moves(g, alive, done, &mut buf);
+        for &card in &buf[..k] {
+            if !self.tick() {
+                return false;
+            }
+            let trick_done = g.play(card);
+            path.push(card);
+            if trick_done {
+                match self.boundary(g, alive, done) {
+                    Err(true) => {
+                        *found = Some(path.clone());
+                    }
+                    Err(false) => {}
+                    Ok((a, d, _)) => out.push((path.clone(), g.clone(), a, d)),
+                }
+            } else if !self.expand(g, alive, done, path, out, found) {
+                path.pop();
+                g.undo();
+                return false;
+            }
+            path.pop();
+            g.undo();
+            if found.is_some() {
+                return true;
+            }
+        }
+        true
     }
 }
 
@@ -475,5 +905,129 @@ tasks:
         // Player1 holds S2 and S4 -> "only S2" triggers a re-deal.
         let s = situation("Player3: only S2");
         assert_eq!(solve(&s, &Options::default()).unwrap().0, Verdict::Redeal("only S2".into()));
+    }
+
+    /// A random late-game situation (`left` tricks to go) with `k` random
+    /// tasks of unknown owner.
+    fn random_open_situation(rng: &mut crate::rng::Rng, n: usize, left: usize, k: usize) -> Situation {
+        use crate::catalogue::catalogue;
+        use crate::situation::{Assignment, PlayedTrick};
+        let hands = Game::random_hands(n, rng);
+        let mut g = Game::new(&hands).unwrap();
+        while g.tricks_left() > left || !g.current.is_empty() {
+            let moves: Vec<Card> = g.legal_moves().iter().collect();
+            g.play(moves[rng.below(moves.len())]);
+        }
+        let pool: Vec<_> = catalogue().iter().filter(|t| !t.is_rule()).collect();
+        Situation {
+            hands,
+            tasks: (0..k).map(|_| Assignment { card: pool[rng.below(pool.len())], owner: Owner::Unknown }).collect(),
+            played: g.tricks.iter().map(|t| PlayedTrick { leader: t.leader, cards: t.cards.clone() }).collect(),
+            ..Situation::default()
+        }
+    }
+
+    /// One search over all drafts must agree with solving every draft on its
+    /// own, and its answer must be a legal draft whose line does every task.
+    #[test]
+    fn draft_search_in_one_tree_agrees_with_each_draft() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(7);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let mut s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 4 }, 2 + case % 3);
+            let g = s.game().unwrap();
+            if case % 3 == 1 {
+                // Mixed: one owner fixed, the others open.
+                let mut p = rng.below(n);
+                if p == g.captain as usize && !s.tasks[0].card.captain_allowed() {
+                    p = (p + 1) % n;
+                }
+                s.tasks[0].owner = Owner::Player(p as u8);
+            }
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let mut any = false;
+            let mut drafts = 0;
+            crate::draft::for_each_draft(&s.tasks, n, g.captain as usize, |owners| {
+                drafts += 1;
+                let mut d = s.clone();
+                for (a, o) in d.tasks.iter_mut().zip(owners) {
+                    a.owner = *o;
+                }
+                any = matches!(solve(&d, &Options::plain()).unwrap().0, Verdict::Feasible(_));
+                !any
+            });
+            let (v, owners, _) = solve_drafts(&s, &Options::default()).unwrap();
+            match v {
+                Verdict::Feasible(line) => {
+                    assert!(any, "case {case}: one tree feasible, every draft infeasible");
+                    let owners = owners.unwrap();
+                    let mut d = s.clone();
+                    for (a, o) in d.tasks.iter_mut().zip(&owners) {
+                        a.owner = *o;
+                    }
+                    let mut legal = false;
+                    crate::draft::for_each_draft(&s.tasks, n, g.captain as usize, |o| {
+                        legal |= o == owners.as_slice();
+                        !legal
+                    });
+                    assert!(legal, "case {case}: {owners:?} is not a legal draft");
+                    check_line(&d, &line);
+                    feasible += 1;
+                }
+                Verdict::Infeasible => {
+                    assert!(!any, "case {case}: one tree infeasible, but a draft works ({drafts} drafts)");
+                    infeasible += 1;
+                }
+                v => panic!("case {case}: {v:?}"),
+            }
+        }
+        assert!(feasible > 20 && infeasible > 20, "feasible {feasible}, infeasible {infeasible}");
+    }
+
+    #[test]
+    fn best_first_agrees_with_depth_first() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(11);
+        let mut fallbacks_and_full = (0, 0);
+        for case in 0..120 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            // Small limits force the fallback to depth-first; large ones finish best-first.
+            let max_positions = if case % 2 == 0 { 50 } else { 1_000_000 };
+            let bf = Options { strategy: Strategy::BestFirst { max_positions }, ..Options::default() };
+            let (a, ao, _) = solve_drafts(&s, &Options::default()).unwrap();
+            let (b, bo, _) = solve_drafts(&s, &bf).unwrap();
+            match (&a, &b) {
+                (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                    let mut d = s.clone();
+                    for (t, o) in d.tasks.iter_mut().zip(bo.unwrap()) {
+                        t.owner = o;
+                    }
+                    check_line(&d, line);
+                    assert!(ao.is_some());
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => {}
+                _ => panic!("case {case}: dfs {a:?} vs best-first {b:?}"),
+            }
+            if case % 2 == 0 { fallbacks_and_full.0 += 1 } else { fallbacks_and_full.1 += 1 }
+        }
+        assert!(fallbacks_and_full.0 > 30 && fallbacks_and_full.1 > 30);
+    }
+
+    #[test]
+    fn node_limit_gives_undecided() {
+        // From the deal, two hard tasks: far more than 10 000 nodes.
+        let s = situation("Player2: win all 9s\nPlayer3: tricks =0");
+        let opts = Options { node_limit: Some(10_000), ..Options::default() };
+        let (v, stats) = solve(&s, &opts).unwrap();
+        assert_eq!(v, Verdict::Undecided, "{stats:?}");
+        assert!(stats.nodes < 20_000);
     }
 }

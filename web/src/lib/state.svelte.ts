@@ -22,7 +22,7 @@ class Session {
   mission = $state<number | null>(null);
   target = $state<number | null>(null);
   sealed = $state(false);
-  checkAllDrafts = $state(true);
+  checkAllDrafts = $state(false);
   savedId = $state<string | null>(null);
 
   reset(mode: Mode, players = this.players) {

@@ -72,6 +72,12 @@ export type SolveOut =
   | { verdict: 'redeal'; task: string }
   | { verdict: 'cancelled' };
 
+export type SolveDraftsOut =
+  | { verdict: 'feasible'; owners: string[]; line: string[]; tricks: TrickOut[]; stats: { nodes: number } }
+  | { verdict: 'infeasible'; stats: { nodes: number } }
+  | { verdict: 'redeal'; task: string }
+  | { verdict: 'cancelled' | 'undecided' };
+
 export interface DraftLine {
   owners: string[];
   line: string[];
@@ -83,6 +89,7 @@ export interface DraftsOut {
   total: number;
   checked: number;
   working: number;
+  undecided: number;
   sampled: boolean;
   any_works: boolean | null;
   example: DraftLine | null;

@@ -1,12 +1,13 @@
 <script lang="ts">
   // Runs the analyses for a situation text in the worker and shows them.
-  // The verdict comes first; slower analyses fill in afterwards.
+  // The verdict comes first; costly extras (draft count, other drafts,
+  // critical decisions, random deals) run when asked for.
   import { onDestroy, untrack } from 'svelte';
   import TrickList from './TrickList.svelte';
   import Card from './Card.svelte';
   import { winningPosition } from '../lib/cards';
   import { i18n } from '../lib/i18n.svelte';
-  import { Cancelled, SolverClient, type DraftsOut, type NoReturnOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
+  import { Cancelled, SolverClient, type DraftsOut, type NoReturnOut, type SolveDraftsOut, type SolveOut, type TightnessOut, type TrickOut } from '../lib/solver';
   import { isInferred, textOf } from '../lib/tasks';
   import { check, parse, toText, type Situation } from '../lib/wasm';
 
@@ -14,7 +15,7 @@
 
   let {
     text,
-    checkAll = true,
+    checkAll = false,
     onverdict = () => {},
   }: { text: string; checkAll?: boolean; onverdict?: (v: Verdict) => void } = $props();
 
@@ -30,12 +31,13 @@
   let difficulty = $state(0);
   let redeal = $state<string | null>(null);
   let solveOut = $state<SolveOut | null>(null);
+  let draftsOut = $state<SolveDraftsOut | null>(null);
   let drafts = $state<DraftsOut | null>(null);
   let altDrafts = $state<DraftsOut | null>(null);
   let conflict = $state<number[] | null>(null);
   let noReturn = $state<NoReturnOut>(null);
   let tight = $state<TightnessOut | null>(null);
-  let robustness = $state<{ solvable: number; deals: number } | null>(null);
+  let robustness = $state<{ solvable: number; undecided: number; deals: number } | null>(null);
   let robustRunning = $state(false);
   let robustProgress = $state('');
   let step = $state<number | null>(null);
@@ -45,11 +47,9 @@
     redeal
       ? 'redeal'
       : unknownOwners
-        ? drafts?.any_works == null
-          ? null
-          : drafts.any_works
-            ? 'feasible'
-            : 'infeasible'
+        ? draftsOut?.verdict === 'feasible' || draftsOut?.verdict === 'infeasible'
+          ? draftsOut.verdict
+          : null
         : solveOut?.verdict === 'feasible' || solveOut?.verdict === 'infeasible'
           ? solveOut.verdict
           : null,
@@ -59,7 +59,7 @@
   // The line to show: the entered draft's, or a working draft's.
   const shownLine = $derived.by((): { tricks: TrickOut[]; owners?: string[]; fromFix?: boolean } | null => {
     if (solveOut?.verdict === 'feasible') return { tricks: solveOut.tricks };
-    if (unknownOwners && drafts?.example) return drafts.example;
+    if (unknownOwners && draftsOut?.verdict === 'feasible') return { tricks: draftsOut.tricks, owners: draftsOut.owners };
     if (altDrafts?.closest) return { ...altDrafts.closest, fromFix: true };
     return null;
   });
@@ -78,6 +78,7 @@
     error = null;
     progress = '';
     solveOut = drafts = altDrafts = null;
+    draftsOut = null;
     conflict = null;
     noReturn = null;
     tight = null;
@@ -107,18 +108,10 @@
     const draftProgress = (a: number, b: number) => (progress = i18n.t('draftsChecked', { a, b }));
     try {
       if (unknownOwners) {
-        drafts = await client.call<DraftsOut>('drafts', [text, false, LIMIT], draftProgress);
-        const ex = drafts.example;
-        if (ex) {
-          // Tightness along the shown line, for the draft that produced it.
-          const owned = toText({ ...situation, tasks: situation.tasks.map((t, i) => ({ ...t, owner: ex.owners[i] })) });
-          tight = await client.call<TightnessOut | null>('tightness', [owned, JSON.stringify(ex.line)]);
-        }
+        draftsOut = await client.call<SolveDraftsOut>('solve_drafts', [text], nodes);
       } else {
         solveOut = await client.call<SolveOut>('solve', [text], nodes);
-        if (solveOut.verdict === 'feasible') {
-          tight = await client.call<TightnessOut | null>('tightness', [text, JSON.stringify(solveOut.line)]);
-        } else if (solveOut.verdict === 'infeasible') {
+        if (solveOut.verdict === 'infeasible') {
           conflict = await client.call<number[] | null>('conflict', [text]);
           if (situation.played.length) noReturn = await client.call<NoReturnOut>('no_return', [text]);
         }
@@ -146,6 +139,42 @@
     running = false;
   }
 
+  /** Run an on-demand analysis with progress and cancel. */
+  async function extra(f: () => Promise<void>) {
+    running = true;
+    cancelled = false;
+    try {
+      await f();
+    } catch (e) {
+      if (e instanceof Cancelled) cancelled = true;
+      else error = String(e instanceof Error ? e.message : e);
+    }
+    running = false;
+    progress = '';
+  }
+
+  const draftProgressFn = (a: number, b: number) => (progress = i18n.t('draftsChecked', { a, b }));
+
+  /** Count the drafts that work (owners ?), or check all other drafts (owners fixed). */
+  const countDrafts = () =>
+    extra(async () => {
+      if (unknownOwners) drafts = await client.call<DraftsOut>('drafts', [text, false, LIMIT], draftProgressFn);
+      else altDrafts = await client.call<DraftsOut>('drafts', [text, true, LIMIT], draftProgressFn);
+    });
+
+  /** Critical decisions and tightness along the shown line. */
+  const computeTightness = () =>
+    extra(async () => {
+      if (!situation) return;
+      if (solveOut?.verdict === 'feasible') {
+        tight = await client.call<TightnessOut | null>('tightness', [text, JSON.stringify(solveOut.line)]);
+      } else if (draftsOut?.verdict === 'feasible') {
+        const owners = draftsOut.owners;
+        const owned = toText({ ...situation, tasks: situation.tasks.map((t, i) => ({ ...t, owner: owners[i] })) });
+        tight = await client.call<TightnessOut | null>('tightness', [owned, JSON.stringify(draftsOut.line)]);
+      }
+    });
+
   async function testDeals() {
     robustRunning = true;
     robustProgress = '';
@@ -172,9 +201,9 @@
   }
 
   const draftLine = (d: DraftsOut) =>
-    d.sampled
+    (d.sampled
       ? i18n.t('draftsWorkSampled', { pct: Math.round((100 * d.working) / Math.max(1, d.checked)), n: d.total, k: d.checked })
-      : i18n.t('draftsWork', { k: d.working, n: d.total });
+      : i18n.t('draftsWork', { k: d.working, n: d.total })) + (d.undecided ? ' · ' + i18n.t('undecidedN', { n: d.undecided }) : '');
 </script>
 
 {#if error}
@@ -269,10 +298,20 @@
         {#if altDrafts || drafts}
           {@const d = (altDrafts ?? drafts)!}
           <span class="m"><span class="small muted">{i18n.t('draftsThatWork')}</span><strong>{d.working} / {d.sampled ? d.checked : d.total}</strong></span>
+        {:else if situation.tasks.some((t) => t.owner !== 'crew')}
+          <span class="m">
+            <span class="small muted">{i18n.t('draftsThatWork')}</span>
+            <button class="btn small outline-accent" disabled={running || robustRunning} onclick={countDrafts}>{i18n.t('compute')}</button>
+          </span>
         {/if}
         {#if tight}
           <span class="m"><span class="small muted">{i18n.t('criticalDecisions')}</span><strong>{tight.critical} / {tight.choices}</strong></span>
           <span class="m"><span class="small muted">{i18n.t('tightness')}</span><strong>{Math.round(tight.tightness * 100)}%</strong></span>
+        {:else if verdict === 'feasible'}
+          <span class="m">
+            <span class="small muted">{i18n.t('criticalDecisions')} · {i18n.t('tightness')}</span>
+            <button class="btn small outline-accent" disabled={running || robustRunning} onclick={computeTightness}>{i18n.t('compute')}</button>
+          </span>
         {/if}
       </div>
       <div class="panel">
@@ -282,13 +321,14 @@
           <span class="small muted">{i18n.t('randomDeals')}</span>
           {#if robustness}
             <strong>{robustness.solvable} / {robustness.deals}</strong>
+            {#if robustness.undecided}<span class="small muted">{i18n.t('undecidedN', { n: robustness.undecided })}</span>{/if}
           {:else if robustRunning}
             <span class="row small" style="gap: 8px">
               <span class="muted">{robustProgress || i18n.t('computing')}</span>
               <button class="btn small" onclick={cancelDeals}>{i18n.t('cancel')}</button>
             </span>
           {:else}
-            <button class="btn small outline-accent" disabled={running} onclick={testDeals}>{i18n.t('testDeals', { n: 100 })}</button>
+            <button class="btn small outline-accent" disabled={running || robustRunning} onclick={testDeals}>{i18n.t('testDeals', { n: 100 })}</button>
           {/if}
         </span>
       </div>

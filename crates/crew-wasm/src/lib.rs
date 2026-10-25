@@ -276,6 +276,53 @@ pub fn solve_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
                 Verdict::Infeasible => json!({ "verdict": "infeasible", "stats": stats }),
                 Verdict::Redeal(id) => json!({ "verdict": "redeal", "task": id }),
                 Verdict::Cancelled => json!({ "verdict": "cancelled" }),
+                Verdict::Undecided => json!({ "verdict": "undecided" }),
+            })
+        }
+    }
+}
+
+/// Feasibility over all drafts of the `?` tasks in one search: the verdict,
+/// and for a feasible one the owners of a working draft and its line.
+#[wasm_bindgen]
+pub fn solve_drafts(text: &str, progress: JsValue) -> String {
+    let cb = progress_fn(&progress);
+    let report = |n: u64| {
+        if let Some(f) = &cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_f64(n as f64));
+        }
+    };
+    solve_drafts_impl(text, Some(&report))
+}
+
+pub fn solve_drafts_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
+    let s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    let opts = Options { progress, ..Options::default() };
+    match solver::solve_drafts(&s, &opts) {
+        Err(e) => err(e),
+        Ok((v, owners, stats)) => {
+            let stats = json!({ "nodes": stats.nodes, "cache_hits": stats.cache_hits });
+            ok(match (v, owners) {
+                (Verdict::Feasible(line), Some(owners)) => {
+                    let mut d = s.clone();
+                    for (a, o) in d.tasks.iter_mut().zip(&owners) {
+                        a.owner = *o;
+                    }
+                    json!({
+                        "verdict": "feasible",
+                        "owners": owners.iter().map(|&o| owner_str(o)).collect::<Vec<_>>(),
+                        "line": line.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                        "tricks": line_tricks(&d, &line),
+                        "stats": stats
+                    })
+                }
+                (Verdict::Infeasible, _) => json!({ "verdict": "infeasible", "stats": stats }),
+                (Verdict::Redeal(id), _) => json!({ "verdict": "redeal", "task": id }),
+                (Verdict::Undecided, _) => json!({ "verdict": "undecided" }),
+                _ => json!({ "verdict": "cancelled" }),
             })
         }
     }
@@ -328,6 +375,7 @@ pub fn drafts_impl(text: &str, all_drafts: bool, limit: u32, progress: Option<&d
                 "total": r.total,
                 "checked": r.checked,
                 "working": r.working,
+                "undecided": r.undecided,
                 "sampled": r.sampled,
                 "any_works": r.any_works,
                 "example": r.example.as_ref().map(|(o, l)| with_owners(o, l)),
@@ -410,8 +458,8 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, progress: JsValue) -> 
         Err(e) => err(e),
         Ok(s) => {
             let cards: Vec<_> = s.tasks.iter().filter(|a| !a.card.is_rule()).map(|a| a.card).collect();
-            match analysis::deal_robustness(&cards, s.players(), deals as usize, 20, seed as u64, None, Some(&report)) {
-                Some((good, total)) => ok(json!({ "solvable": good, "deals": total })),
+            match analysis::deal_robustness(&cards, s.players(), deals as usize, Some(2_000_000), seed as u64, None, Some(&report)) {
+                Some((good, undecided, total)) => ok(json!({ "solvable": good, "undecided": undecided, "deals": total })),
                 None => ok(Value::Null),
             }
         }
@@ -496,5 +544,14 @@ Player2: win B4
         assert!(d["ok"]["total"].as_u64().unwrap() > 0);
         let bad: Value = serde_json::from_str(&parse("crew 2")).unwrap();
         assert_eq!(bad["error"]["line"], 1);
+    }
+
+    #[test]
+    fn solve_drafts_returns_owners_and_line() {
+        let r: Value = serde_json::from_str(&solve_drafts_impl(TEXT, None)).unwrap();
+        assert_eq!(r["ok"]["verdict"], "feasible");
+        assert_eq!(r["ok"]["owners"][0], "Player2");
+        assert!(r["ok"]["owners"][1].as_str().unwrap().starts_with("Player"));
+        assert!(!r["ok"]["line"].as_array().unwrap().is_empty());
     }
 }

@@ -29,17 +29,20 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--analyse] [--all-drafts] [--limit N] [--no-cache]
+  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--best-first] [--deck-order]
                                  solve every situation in a .crew file; tasks with
-                                 owner ? are searched over all legal drafts (sampled
+                                 owner ? are searched over all legal drafts at once;
+                                 --count-drafts also counts the drafts that work (sampled
                                  above N drafts); --all-drafts also checks other drafts;
                                  --analyse adds critical decisions, smallest conflict
-                                 and point of no return
+                                 and point of no return; --best-first and --deck-order
+                                 switch the search strategy and the move order
   crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
                                  random deals, tasks drawn to the target sum, random legal draft
   crew bench --load FILE [--timeout SECS] [-v]
                                  the same timing over the situations in FILE; with owner ?
-                                 the draft search (verdict over all drafts) is timed";
+                                 the verdict over all drafts is timed
+                                 (bench also takes --best-first, --deck-order, --no-cache)";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -74,27 +77,37 @@ fn with_timeout<R>(secs: f64, f: impl FnOnce(&std::sync::atomic::AtomicBool) -> 
 }
 
 /// Verdict label and node count (0 where the search does not count nodes).
-fn timed_verdict(s: &Situation, secs: f64) -> ((&'static str, u64), f64) {
-    if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
-        return with_timeout(secs, |cancel| {
-            let opts = DraftOptions { cancel: Some(cancel), ..DraftOptions::default() };
-            match analysis::draft_search(s, &opts) {
-                Ok(r) => match r.any_works {
-                    Some(true) => ("feasible", 0),
-                    Some(false) => ("infeasible", 0),
-                    None => ("timeout", 0),
-                },
-                Err(_) => ("error", 0),
-            }
-        });
-    }
-    with_timeout(secs, |cancel| match solver::solve(s, &Options { cancel: Some(cancel), ..Options::default() }) {
-        Ok((Verdict::Feasible(_), st)) => ("feasible", st.nodes),
-        Ok((Verdict::Infeasible, st)) => ("infeasible", st.nodes),
-        Ok((Verdict::Redeal(_), _)) => ("re-deal", 0),
-        Ok((Verdict::Cancelled, st)) => ("timeout", st.nodes),
-        Err(_) => ("error", 0),
+fn timed_verdict(s: &Situation, secs: f64, base: &Options) -> ((&'static str, u64), f64) {
+    with_timeout(secs, |cancel| {
+        let opts = Options { cancel: Some(cancel), ..base.clone() };
+        let r = if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
+            solver::solve_drafts(s, &opts).map(|(v, _, st)| (v, st))
+        } else {
+            solver::solve(s, &opts)
+        };
+        match r {
+            Ok((Verdict::Feasible(_), st)) => ("feasible", st.nodes),
+            Ok((Verdict::Infeasible, st)) => ("infeasible", st.nodes),
+            Ok((Verdict::Redeal(_), _)) => ("re-deal", 0),
+            Ok((Verdict::Cancelled | Verdict::Undecided, st)) => ("timeout", st.nodes),
+            Err(_) => ("error", 0),
+        }
     })
+}
+
+/// Search options from the command line flags.
+fn search_options(args: &[String]) -> Options<'static> {
+    let mut o = Options::default();
+    if args.iter().any(|a| a == "--no-cache") {
+        o.use_cache = false;
+    }
+    if args.iter().any(|a| a == "--deck-order") {
+        o.decider = &crew_core::decider::DECK_ORDER;
+    }
+    if args.iter().any(|a| a == "--best-first") {
+        o.strategy = solver::Strategy::BestFirst { max_positions: 2_000_000 };
+    }
+    o
 }
 
 fn cmd_bench(args: &[String]) -> Result<(), String> {
@@ -111,6 +124,7 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
     let timeout: f64 = flag(args, "--timeout", 10.0)?;
     let save: Option<String> = args.iter().position(|a| a == "--save").and_then(|i| args.get(i + 1).cloned());
     let verbose = args.iter().any(|a| a == "-v");
+    let search_opts = search_options(args);
 
     let load: Option<String> = args.iter().position(|a| a == "--load").and_then(|i| args.get(i + 1).cloned());
     let loaded = match &load {
@@ -148,7 +162,7 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
                 }
             }
         };
-        let ((label, nodes), secs) = timed_verdict(&s, timeout);
+        let ((label, nodes), secs) = timed_verdict(&s, timeout, &search_opts);
         total_secs += secs;
         total_nodes += nodes;
         if verbose {
@@ -245,7 +259,8 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
 
 fn cmd_solve(args: &[String]) -> Result<(), String> {
     let file = args.iter().find(|a| !a.starts_with("--")).ok_or(USAGE)?;
-    let use_cache = !args.iter().any(|a| a == "--no-cache");
+    let opts = search_options(args);
+    let count = args.iter().any(|a| a == "--count-drafts");
     let all_drafts = args.iter().any(|a| a == "--all-drafts");
     let analyse = args.iter().any(|a| a == "--analyse");
     let limit: u64 = flag(args, "--limit", 2000)?;
@@ -259,11 +274,39 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
             println!("{t}");
         }
         if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
-            print_drafts(s, None, limit);
+            let start = Instant::now();
+            match solver::solve_drafts(s, &opts) {
+                Err(e) => println!("error: {e}"),
+                Ok((v, owners, stats)) => {
+                    match (&v, owners) {
+                        (Verdict::Feasible(line), Some(owners)) => {
+                            println!("FEASIBLE with this draft:");
+                            let mut d = s.clone();
+                            for (a, o) in d.tasks.iter_mut().zip(owners) {
+                                println!("  {:<8} {}", format!("{}:", owner_name(&o)), a.card.id);
+                                a.owner = o;
+                            }
+                            print_line(&d, line);
+                        }
+                        (Verdict::Infeasible, _) => println!("NOT FEASIBLE with any draft"),
+                        (Verdict::Redeal(id), _) => println!("RE-DEAL (task '{id}')"),
+                        (v, _) => println!("{v:?}"),
+                    }
+                    println!(
+                        "{:.3} s, {} nodes, {} cache hits, {} cached positions",
+                        start.elapsed().as_secs_f64(),
+                        stats.nodes,
+                        stats.cache_hits,
+                        stats.cache_size
+                    );
+                }
+            }
+            if count {
+                print_drafts(s, None, limit);
+            }
             continue;
         }
         let start = Instant::now();
-        let opts = Options { use_cache, ..Options::default() };
         match solver::solve(s, &opts) {
             Err(e) => println!("error: {e}"),
             Ok((v, stats)) => {
@@ -316,6 +359,7 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
                     }
                     Verdict::Redeal(id) => println!("RE-DEAL (task '{id}')"),
                     Verdict::Cancelled => println!("CANCELLED"),
+                    Verdict::Undecided => println!("UNDECIDED (node limit)"),
                 }
                 println!(
                     "{:.3} s, {} nodes, {} cache hits, {} cached positions",

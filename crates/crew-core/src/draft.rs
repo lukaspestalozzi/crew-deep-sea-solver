@@ -26,7 +26,7 @@ pub fn seat_counts(tasks: usize, players: usize, captain: usize) -> Option<Vec<u
 
 /// Capacity left per seat for the unknown tasks, given the fixed owners.
 /// `None` if the fixed owners already break the draft rule.
-fn capacities(tasks: &[Assignment], players: usize, captain: usize) -> Option<Vec<usize>> {
+pub(crate) fn capacities(tasks: &[Assignment], players: usize, captain: usize) -> Option<Vec<usize>> {
     let draftable: Vec<&Assignment> = tasks.iter().filter(|a| a.owner != Owner::Crew).collect();
     let mut fixed = vec![0usize; players];
     for a in &draftable {

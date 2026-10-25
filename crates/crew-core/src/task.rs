@@ -716,6 +716,13 @@ impl Kind {
 /// Is there a way to split the remaining tricks so that every rule holds?
 /// Each player also keeps at least the tricks their top submarines will win.
 pub fn counts_possible(g: &Game, rules: &[CountRule]) -> bool {
+    any_final_counts(g, |f| rules.iter().all(|r| r.holds(f)))
+}
+
+/// Is there a possible split of the remaining tricks (final counts `f`, one per
+/// player, each at least the current count plus the certain submarine wins)
+/// for which `test(f)` holds?
+pub fn any_final_counts(g: &Game, mut test: impl FnMut(&[u8]) -> bool) -> bool {
     let n = g.n;
     let r = g.tricks_left() as u8;
     let mut lo = [0u8; crate::game::MAX_PLAYERS];
@@ -728,16 +735,16 @@ pub fn counts_possible(g: &Game, rules: &[CountRule]) -> bool {
         return false;
     }
     let mut f = lo;
-    fn rec(p: usize, n: usize, left: u8, f: &mut [u8; crate::game::MAX_PLAYERS], rules: &[CountRule]) -> bool {
+    fn rec(p: usize, n: usize, left: u8, f: &mut [u8; crate::game::MAX_PLAYERS], test: &mut dyn FnMut(&[u8]) -> bool) -> bool {
         if p == n - 1 {
             f[p] += left;
-            let ok = rules.iter().all(|r| r.holds(&f[..n]));
+            let ok = test(&f[..n]);
             f[p] -= left;
             return ok;
         }
         for extra in 0..=left {
             f[p] += extra;
-            let ok = rec(p + 1, n, left - extra, f, rules);
+            let ok = rec(p + 1, n, left - extra, f, test);
             f[p] -= extra;
             if ok {
                 return true;
@@ -745,7 +752,7 @@ pub fn counts_possible(g: &Game, rules: &[CountRule]) -> bool {
         }
         false
     }
-    rec(0, n, r - need, &mut f, rules)
+    rec(0, n, r - need, &mut f, &mut test)
 }
 
 pub fn top_subs_count(g: &Game, p: usize) -> u64 {

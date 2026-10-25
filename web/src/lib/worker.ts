@@ -15,6 +15,9 @@ self.onmessage = async (e: MessageEvent<Call>) => {
       case 'solve':
         out = w.solve(args[0] as string, progress);
         break;
+      case 'solve_drafts':
+        out = w.solve_drafts(args[0] as string, progress);
+        break;
       case 'drafts':
         out = w.drafts(args[0] as string, args[1] as boolean, args[2] as number, progress);
         break;

@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod card;
+pub mod decider;
 pub mod catalogue;
 pub mod draft;
 pub mod game;

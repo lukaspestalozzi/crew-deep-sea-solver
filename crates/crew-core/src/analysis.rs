@@ -6,7 +6,7 @@ use crate::rng::Rng;
 use crate::situation::{Owner, Situation};
 use crate::solver::{self, Options, SolveError, Verdict};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// Result of searching over drafts.
 #[derive(Debug, Clone)]
@@ -17,9 +17,12 @@ pub struct DraftReport {
     pub checked: u64,
     /// Feasible drafts among those checked.
     pub working: u64,
+    /// Drafts checked that hit the node limit without an answer.
+    pub undecided: u64,
     /// True if `checked < total` because drafts were sampled.
     pub sampled: bool,
-    /// Exact answer to "does any legal draft work?"; `None` if cancelled.
+    /// Exact answer to "does any legal draft work?" (one search over all
+    /// drafts); `None` if cancelled.
     pub any_works: Option<bool>,
     /// A working draft and its winning line.
     pub example: Option<(Vec<Owner>, Vec<Card>)>,
@@ -40,11 +43,13 @@ pub struct DraftOptions<'a> {
     pub cancel: Option<&'a AtomicBool>,
     /// Called after each draft with (drafts checked, drafts planned).
     pub progress: Option<&'a dyn Fn(u64, u64)>,
+    /// Nodes per draft before it counts as undecided.
+    pub node_limit: Option<u64>,
 }
 
 impl Default for DraftOptions<'_> {
     fn default() -> Self {
-        DraftOptions { limit: 2000, seed: 1, reference: None, cancel: None, progress: None }
+        DraftOptions { limit: 2000, seed: 1, reference: None, cancel: None, progress: None, node_limit: Some(1_000_000) }
     }
 }
 
@@ -52,12 +57,19 @@ fn distance(a: &[Owner], b: &[Owner]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x != y).count()
 }
 
-/// Search the drafts for the tasks with owner `?` (fixed owners stay).
+/// Search the drafts for the tasks with owner `?` (fixed owners stay): the
+/// exact yes/no over all drafts in one search, then each draft counted on its
+/// own (up to `node_limit` nodes each).
 pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     let (n, captain) = (g.n, g.captain as usize);
-    let cancelled = || opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
-    let solve_opts = Options { cancel: opts.cancel, ..Options::default() };
+    let solve_opts = Options { cancel: opts.cancel, node_limit: opts.node_limit, ..Options::default() };
+
+    let (any_works, one_tree_example) = match solver::solve_drafts(s, &Options { cancel: opts.cancel, ..Options::default() })? {
+        (Verdict::Feasible(line), Some(owners), _) => (Some(true), Some((owners, line))),
+        (Verdict::Infeasible | Verdict::Redeal(_), _, _) => (Some(false), None),
+        _ => (None, None),
+    };
 
     // Rule out (task, player) pairs that are impossible even alone.
     let mut impossible = vec![vec![false; n]; s.tasks.len()];
@@ -85,8 +97,9 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
         total,
         checked: 0,
         working: 0,
+        undecided: 0,
         sampled: false,
-        any_works: None,
+        any_works,
         example: None,
         closest: None,
         impossible_pairs,
@@ -118,13 +131,16 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
                 Some(true)
             }
             Ok((Verdict::Cancelled, _)) => None,
+            Ok((Verdict::Undecided, _)) => {
+                report.undecided += 1;
+                Some(false)
+            }
             _ => Some(false),
         }
     };
 
     if total <= opts.limit {
         // Exhaustive: drafts with an impossible pair are failures without solving.
-        let mut cancelled_flag = false;
         let mut visited = 0u64;
         draft::for_each_draft(&s.tasks, n, captain, |owners| {
             visited += 1;
@@ -133,16 +149,10 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
                 report.checked += 1;
                 return true;
             }
-            match solve_draft(owners, &mut report) {
-                None => {
-                    cancelled_flag = true;
-                    false
-                }
-                Some(_) => true,
-            }
+            solve_draft(owners, &mut report).is_some()
         });
-        if !cancelled_flag {
-            report.any_works = Some(report.working > 0);
+        if report.example.is_none() {
+            report.example = one_tree_example;
         }
         return Ok(report);
     }
@@ -164,37 +174,12 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
             continue;
         }
         if solve_draft(&owners, &mut report).is_none() {
-            return Ok(report);
+            break;
         }
     }
-    if report.working > 0 {
-        report.any_works = Some(true);
-        return Ok(report);
+    if report.example.is_none() {
+        report.example = one_tree_example;
     }
-    // No sampled draft works: settle the yes/no question exactly, skipping
-    // drafts with impossible pairs.
-    let mut found = Some(false);
-    draft::for_each_draft_filtered(&s.tasks, n, captain, &allowed, |owners| {
-        if cancelled() {
-            found = None;
-            return false;
-        }
-        let mut probe = DraftReport { ..report.clone() };
-        match solve_draft(owners, &mut probe) {
-            Some(true) => {
-                report.example = probe.example;
-                report.closest = probe.closest;
-                found = Some(true);
-                false
-            }
-            Some(false) => true,
-            None => {
-                found = None;
-                false
-            }
-        }
-    });
-    report.any_works = found;
     Ok(report)
 }
 
@@ -364,59 +349,39 @@ pub fn tightness(s: &Situation, line: &[Card], cancel: Option<&AtomicBool>) -> R
 }
 
 /// Share of random deals on which these tasks can be fulfilled with some
-/// legal draft (up to `drafts_per_deal` random drafts tried per deal, so the
-/// result is a lower bound when a deal has more drafts than that).
+/// legal draft (one search over all drafts per deal). Returns (solvable,
+/// undecided at `node_limit` nodes, deals); `None` if cancelled.
 pub fn deal_robustness(
     cards: &[&'static crate::catalogue::TaskCard],
     players: usize,
     deals: usize,
-    drafts_per_deal: usize,
+    node_limit: Option<u64>,
     seed: u64,
     cancel: Option<&AtomicBool>,
     progress: Option<&dyn Fn(usize, usize)>,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, usize)> {
     use crate::game::Game;
     use crate::situation::Assignment;
     let mut rng = Rng::new(seed);
-    let opts = Options { cancel, ..Options::default() };
-    let mut ok = 0;
+    let opts = Options { cancel, node_limit, ..Options::default() };
+    let (mut ok, mut undecided) = (0, 0);
     for d in 0..deals {
         if let Some(f) = progress {
             f(d, deals);
         }
-        let hands = Game::random_hands(players, &mut rng);
-        let captain = Game::new(&hands).unwrap().captain as usize;
-        let mut s = Situation {
-            hands,
+        let s = Situation {
+            hands: Game::random_hands(players, &mut rng),
             tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
             ..Situation::default()
         };
-        if solver::redeal(&s).is_some() {
-            continue;
-        }
-        let mut seen = HashSet::new();
-        for _ in 0..drafts_per_deal * 5 {
-            if seen.len() >= drafts_per_deal {
-                break;
-            }
-            let Some(owners) = draft::random_draft(&s.tasks, players, captain, &mut rng) else { break };
-            if !seen.insert(owners.clone()) {
-                continue;
-            }
-            for (a, o) in s.tasks.iter_mut().zip(&owners) {
-                a.owner = *o;
-            }
-            match solver::solve(&s, &opts) {
-                Ok((Verdict::Feasible(_), _)) => {
-                    ok += 1;
-                    break;
-                }
-                Ok((Verdict::Cancelled, _)) => return None,
-                _ => {}
-            }
+        match solver::solve_drafts(&s, &opts) {
+            Ok((Verdict::Feasible(_), _, _)) => ok += 1,
+            Ok((Verdict::Cancelled, _, _)) => return None,
+            Ok((Verdict::Undecided, _, _)) => undecided += 1,
+            _ => {}
         }
     }
-    Some((ok, deals))
+    Some((ok, undecided, deals))
 }
 
 #[cfg(test)]
@@ -532,10 +497,10 @@ tasks:
     #[test]
     fn deal_robustness_of_an_easy_and_an_impossible_set() {
         let easy = [crate::catalogue::find("first-trick").unwrap()];
-        assert_eq!(deal_robustness(&easy, 4, 10, 5, 1, None, None), Some((10, 10)));
+        assert_eq!(deal_robustness(&easy, 4, 10, None, 1, None, None), Some((10, 0, 10)));
         let clash = [crate::catalogue::find("first-trick").unwrap(), crate::catalogue::find("first 2").unwrap()];
         // Same player may take both only with 2 tasks per seat; with 4 players each takes one.
-        assert_eq!(deal_robustness(&clash, 4, 5, 5, 1, None, None), Some((0, 5)));
+        assert_eq!(deal_robustness(&clash, 4, 5, None, 1, None, None), Some((0, 0, 5)));
     }
 
     #[test]
