@@ -282,6 +282,87 @@ impl MoveDecider for TaskAware {
 pub static DECK_ORDER: DeckOrder = DeckOrder;
 pub static TASK_AWARE: TaskAware = TaskAware { salt: 0 };
 
+/// Task-aware order whose leads are ranked by playing the trick out: every
+/// later player answers by simple rules (cheapest winning card if it wants
+/// the trick, highest losing card if it must lose it, otherwise feed the
+/// winner a card it needs or play low), and the resulting trick is scored by
+/// who wins it and which needed or forbidden cards it takes. Follows use the
+/// task-aware order.
+pub struct Lookahead;
+
+pub static LOOKAHEAD: Lookahead = Lookahead;
+
+impl MoveDecider for Lookahead {
+    fn order(&self, pos: &Position, moves: &mut [Card]) {
+        let g = pos.game;
+        TASK_AWARE.order(pos, moves);
+        if !g.current.is_empty() || moves.len() < 2 {
+            return;
+        }
+        let me = g.to_play();
+        let wishes: Vec<(CardSet, CardSet)> = (0..g.n).map(|p| card_wishes(pos, p)).collect();
+        let desires: Vec<i32> = (0..g.n).map(|p| desire(pos, p)).collect();
+        let mut scored: [(i32, usize, Card); 14] = [(0, 0, Card::from_index(0)); 14];
+        for (i, &m) in moves.iter().enumerate() {
+            let mut cards = [m; 6];
+            let led = m.suit();
+            for k in 1..g.n {
+                let q = (me + k) % g.n;
+                let best = winning_position(&cards[..k]);
+                let best_card = cards[best];
+                let follow = g.hands[q].intersect(led.cards());
+                let playable = if follow.is_empty() { g.hands[q] } else { follow };
+                let beats = |y: Card| {
+                    if y.is_sub() {
+                        !best_card.is_sub() || y.value() > best_card.value()
+                    } else {
+                        !best_card.is_sub() && y.suit() == best_card.suit() && y.value() > best_card.value()
+                    }
+                };
+                let rank = |y: Card| y.value() as i32 + if y.is_sub() { 10 } else { 0 };
+                let winner_now = (me + best) % g.n;
+                let pick = if desires[q] > 0 && playable.iter().any(beats) {
+                    playable.iter().filter(|&y| beats(y)).min_by_key(|&y| rank(y))
+                } else if desires[q] < 0 && playable.iter().any(|y| !beats(y)) {
+                    playable.iter().filter(|&y| !beats(y)).max_by_key(|&y| rank(y))
+                } else {
+                    let w = &wishes[winner_now];
+                    playable
+                        .iter()
+                        .filter(|&y| !beats(y) && w.0.contains(y))
+                        .min_by_key(|&y| rank(y))
+                        .or_else(|| playable.iter().filter(|&y| !beats(y)).min_by_key(|&y| rank(y)))
+                        .or_else(|| playable.iter().min_by_key(|&y| rank(y)))
+                };
+                cards[k] = pick.unwrap_or(m);
+            }
+            let w = (me + winning_position(&cards[..g.n])) % g.n;
+            let mut score = 0;
+            for &c in &cards[..g.n] {
+                if wishes[w].0.contains(c) {
+                    score += 3;
+                }
+                if wishes[w].1.contains(c) {
+                    score -= 6;
+                }
+                for p in (0..g.n).filter(|&p| p != w) {
+                    if wishes[p].0.contains(c) {
+                        score -= 6;
+                    }
+                }
+            }
+            score += if desires[w] < 0 { -4 } else if desires[w] > 0 { 2 } else { 0 };
+            scored[i] = (score, i, m);
+        }
+        let k = moves.len();
+        // Stable on the task-aware rank for equal scores.
+        scored[..k].sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (i, &(_, _, m)) in scored[..k].iter().enumerate() {
+            moves[i] = m;
+        }
+    }
+}
+
 /// Task-aware orders with random tie-breaks, one per restart round.
 pub static TASK_AWARE_RANDOM: [TaskAware; 8] = [
     TaskAware { salt: 0x243F_6A88 },

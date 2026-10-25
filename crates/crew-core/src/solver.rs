@@ -1729,4 +1729,34 @@ Player1: {task}"
         }
         assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
     }
+
+    #[test]
+    fn lookahead_order_agrees_with_depth_first() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(88);
+        let (mut feasible, mut infeasible) = (0, 0);
+        for case in 0..150 {
+            let n = 3 + case % 3;
+            let s = random_open_situation(&mut rng, n, if n == 5 { 3 } else { 5 }, 2 + case % 2);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let reference = solve_drafts(&s, &Options { strategy: Strategy::Dfs, ..Options::default() }).unwrap().0;
+            let opts = Options { decider: &crate::decider::LOOKAHEAD, ..Options::default() };
+            let (v, owners, _) = solve_drafts(&s, &opts).unwrap();
+            match (&reference, &v) {
+                (Verdict::Feasible(_), Verdict::Feasible(line)) => {
+                    let mut d = s.clone();
+                    for (t, o) in d.tasks.iter_mut().zip(owners.unwrap()) {
+                        t.owner = o;
+                    }
+                    check_line(&d, line);
+                    feasible += 1;
+                }
+                (Verdict::Infeasible, Verdict::Infeasible) => infeasible += 1,
+                _ => panic!("case {case}: dfs {reference:?}, lookahead {v:?}"),
+            }
+        }
+        assert!(feasible > 30 && infeasible > 30, "{feasible} {infeasible}");
+    }
 }
