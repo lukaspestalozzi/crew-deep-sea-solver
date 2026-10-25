@@ -37,7 +37,7 @@ cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 - `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
 - `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once.
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
-- `--dfs`, `--best-first`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
+- `--dfs`, `--best-first`, `--task-aware`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
 - `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file.
 
 ## Search
@@ -60,9 +60,12 @@ pairs remains, and won once some draft has all its tasks done.
   relative rank, so positions differing only in interchangeable cards share
   a key). The cache has a size limit.
 - Interchangeable cards are tried once.
-- Pluggable through `Options`: a `MoveDecider` (`decider.rs`: `TaskAware` by
-  default, `DeckOrder` as reference) orders the moves, and the same trait can
-  drive a self-playing bot. The `Strategy` is `Portfolio` (default: depth-first
+- Pluggable through `Options`: a `MoveDecider` (`decider.rs`) orders the
+  moves, and the same trait can drive a self-playing bot. `Lookahead` (default)
+  ranks leads by playing the trick out and scoring the result; `TaskAware`
+  judges each card by whether it can still be made to win or lose the trick
+  (later players must follow suit) and what the players' tasks want;
+  `DeckOrder` is the reference. The `Strategy` is `Portfolio` (default: depth-first
   restarts alternating the decider with deck order, node budgets doubling,
   lost-position cache kept), plain `Dfs`, or `BestFirst` over positions between
   tricks (falls back to depth-first above a position budget). A node limit
