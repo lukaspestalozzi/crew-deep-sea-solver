@@ -33,6 +33,9 @@ export interface Pairing {
   open: number;
   /** Pairs, most together (compared with the rules) first. */
   pairs: PairTrend[];
+  /** Drafts of all deals so far, and those left undecided (search limit). */
+  drafts: number;
+  openDrafts: number;
 }
 
 export function pairTrends(rows: DealPairingRow[]): Pairing {
@@ -45,7 +48,11 @@ export function pairTrends(rows: DealPairingRow[]): Pairing {
   };
   let solvable = 0;
   let open = 0;
+  let drafts = 0;
+  let openDrafts = 0;
   for (const r of rows) {
+    drafts += r.decided + r.open;
+    openDrafts += r.open;
     if (r.works === 0) {
       if (r.open > 0) open++;
       continue;
@@ -65,5 +72,5 @@ export function pairTrends(rows: DealPairingRow[]): Pairing {
     .filter((p) => p.deals > 0)
     .map((p) => ({ ...p, works: p.works / p.deals, all: p.all / p.deals }))
     .sort((x, y) => y.works - y.all - (x.works - x.all));
-  return { deals: rows.length, solvable, open, pairs };
+  return { deals: rows.length, solvable, open, pairs, drafts, openDrafts };
 }

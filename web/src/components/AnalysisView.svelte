@@ -126,7 +126,9 @@
       {#if m.robustness}
         <span class="fig">
           <strong>{m.robustness.solvable} / {m.robustness.deals}</strong>
-          {#if m.robustness.undecided}<span class="small muted">{i18n.t('undecidedN', { n: m.robustness.undecided })}</span>{/if}
+          {#if m.robustness.undecided}
+            <span class="small muted">{i18n.t(m.dealsJob.running ? 'dealsOpen' : 'undecidedN', { n: m.robustness.undecided })}</span>
+          {/if}
         </span>
       {/if}
     </AnalysisCard>

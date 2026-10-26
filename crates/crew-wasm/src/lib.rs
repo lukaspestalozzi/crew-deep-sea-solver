@@ -535,11 +535,18 @@ pub fn pair_conflicts_impl(text: &str, all_drafts: bool, part: (usize, usize), p
 
 /// Share of random deals on which the situation's task cards can be fulfilled.
 #[wasm_bindgen]
-pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32, progress: JsValue) -> String {
+pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32, progress: JsValue, on_deal: JsValue) -> String {
     let cb = progress_fn(&progress);
     let report = |done: usize, total: usize| {
         if let Some(f) = &cb {
             let _ = f.call2(&JsValue::NULL, &JsValue::from_f64(done as f64), &JsValue::from_f64(total as f64));
+        }
+    };
+    // Each deal as JSON when decided or left open: {deal, solvable: true | false | null}.
+    let deal_cb = progress_fn(&on_deal);
+    let tell = |d: usize, x: Option<bool>| {
+        if let Some(f) = &deal_cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&json!({ "deal": d, "solvable": x }).to_string()));
         }
     };
     match situation(text) {
@@ -555,6 +562,7 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32,
                 (part as usize, parts as usize),
                 &Options { node_limit: Some(2_000_000), cache_limit: cache_share(parts), ..Options::default() },
                 Some(&report),
+                Some(&tell),
             ) {
                 Some((good, undecided, total)) => ok(json!({ "solvable": good, "undecided": undecided, "deals": total })),
                 None => ok(Value::Null),
@@ -569,17 +577,32 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32,
 /// decided, open, same: [[i, j, working, decided]], always, never}, with i, j
 /// task indices of the situation. Returns true, or false if cancelled.
 #[wasm_bindgen]
-pub fn deal_pairing(text: &str, deals: u32, seed: u32, part: u32, parts: u32, on_deal: JsValue) -> String {
+pub fn deal_pairing(text: &str, deals: u32, seed: u32, part: u32, parts: u32, on_deal: JsValue, progress: JsValue) -> String {
     let cb = progress_fn(&on_deal);
     let tell = |d: String| {
         if let Some(f) = &cb {
             let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&d));
         }
     };
-    deal_pairing_impl(text, deals, seed, (part as usize, parts as usize), &tell)
+    // The draft count of the deal in progress: (decided, planned, working, open).
+    let pcb = progress_fn(&progress);
+    let report = |a: u64, b: u64, w: u64, o: u64| {
+        if let Some(f) = &pcb {
+            let args = js_sys::Array::of4(&(a as f64).into(), &(b as f64).into(), &(w as f64).into(), &(o as f64).into());
+            let _ = f.apply(&JsValue::NULL, &args);
+        }
+    };
+    deal_pairing_impl(text, deals, seed, (part as usize, parts as usize), &tell, Some(&report))
 }
 
-pub fn deal_pairing_impl(text: &str, deals: u32, seed: u32, part: (usize, usize), tell: &dyn Fn(String)) -> String {
+pub fn deal_pairing_impl(
+    text: &str,
+    deals: u32,
+    seed: u32,
+    part: (usize, usize),
+    tell: &dyn Fn(String),
+    progress: Option<&dyn Fn(u64, u64, u64, u64)>,
+) -> String {
     let s = match situation(text) {
         Ok(s) => s,
         Err(e) => return err(e),
@@ -602,7 +625,7 @@ pub fn deal_pairing_impl(text: &str, deals: u32, seed: u32, part: (usize, usize)
         )
     };
     let opts = Options { node_limit: Some(1_000_000), cache_limit: cache_share(part.1 as u32), ..Options::default() };
-    match analysis::deal_pairing(&cards, s.players(), deals as usize, seed as u64, part, 2000, &opts, &note) {
+    match analysis::deal_pairing(&cards, s.players(), deals as usize, seed as u64, part, 2000, &opts, &note, progress) {
         Ok(done) => ok(json!(done)),
         Err(e) => err(e),
     }
@@ -700,7 +723,7 @@ Player2: win B4
         let got = std::cell::RefCell::new(Vec::<Value>::new());
         let tell = |x: String| got.borrow_mut().push(serde_json::from_str(&x).unwrap());
         let text = TEXT.replace("Player2: win B4", "?: win B4");
-        let r: Value = serde_json::from_str(&deal_pairing_impl(&text, 3, 7, (0, 1), &tell)).unwrap();
+        let r: Value = serde_json::from_str(&deal_pairing_impl(&text, 3, 7, (0, 1), &tell, None)).unwrap();
         assert_eq!(r["ok"], true);
         let got = got.into_inner();
         assert_eq!(got.len(), 3);

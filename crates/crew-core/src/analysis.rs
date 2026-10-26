@@ -515,7 +515,9 @@ pub fn tightness(s: &Situation, line: &[Card], cancel: Option<&AtomicBool>) -> R
 /// legal draft (one search over all drafts per deal). A first pass gives each
 /// deal up to `opts.node_limit` nodes; with `settle`, the deals left open are
 /// then searched to the end. `part` (k, n): only every n-th deal from k, for
-/// parallel workers. Progress: (deals done, deals of this part). Returns
+/// parallel workers. Progress: (deals done, deals of this part); `on_deal`
+/// gets (deal number, solvable or `None` if still open) whenever a deal is
+/// decided or left open, again when the second pass settles it. Returns
 /// (solvable, still open, deals of this part); `None` if cancelled in the
 /// first pass.
 #[allow(clippy::too_many_arguments)]
@@ -528,7 +530,13 @@ pub fn deal_robustness(
     part: (usize, usize),
     opts: &Options,
     progress: Option<&dyn Fn(usize, usize)>,
+    on_deal: Option<&dyn Fn(usize, Option<bool>)>,
 ) -> Option<(usize, usize, usize)> {
+    let tell = |d: usize, x: Option<bool>| {
+        if let Some(f) = on_deal {
+            f(d, x);
+        }
+    };
     use crate::game::Game;
     use crate::situation::Assignment;
     let mut rng = Rng::new(seed);
@@ -553,24 +561,30 @@ pub fn deal_robustness(
             ..Situation::default()
         };
         match solver::solve_drafts(&s, opts) {
-            Ok((Verdict::Feasible(_), _, _)) => ok += 1,
+            Ok((Verdict::Feasible(_), _, _)) => {
+                ok += 1;
+                tell(d, Some(true));
+            }
             Ok((Verdict::Cancelled, _, _)) => return None,
-            Ok((Verdict::Undecided, _, _)) => open.push(s),
-            _ => {}
+            Ok((Verdict::Undecided, _, _)) => {
+                tell(d, None);
+                open.push((d, s));
+            }
+            _ => tell(d, Some(false)),
         }
     }
     if settle {
-        while let Some(s) = open.pop() {
-            if let Some(f) = progress {
-                f(mine - open.len() - 1, mine);
-            }
+        while let Some((d, s)) = open.pop() {
             match solver::solve_drafts(&s, &Options { node_limit: None, ..opts.clone() }) {
-                Ok((Verdict::Feasible(_), _, _)) => ok += 1,
+                Ok((Verdict::Feasible(_), _, _)) => {
+                    ok += 1;
+                    tell(d, Some(true));
+                }
                 Ok((Verdict::Cancelled, _, _)) => {
-                    open.push(s);
+                    open.push((d, s));
                     break;
                 }
-                _ => {}
+                _ => tell(d, Some(false)),
             }
         }
     }
@@ -595,8 +609,9 @@ pub struct DealPairing {
 
 /// For each random deal of the task set (owners `?`): every draft decided
 /// (sampled above `limit`), then [`DealPairing`]. `part` (k, n): every n-th
-/// deal from k. `on_deal` gets each deal's result as it is done. Returns
-/// false if cancelled.
+/// deal from k. `on_deal` gets each deal's result as it is done; `progress`
+/// the draft count of the deal in progress (see [`DraftOptions::progress`]).
+/// Returns false if cancelled.
 #[allow(clippy::too_many_arguments)]
 pub fn deal_pairing(
     cards: &[&'static crate::catalogue::TaskCard],
@@ -607,6 +622,7 @@ pub fn deal_pairing(
     limit: u64,
     opts: &Options,
     on_deal: &dyn Fn(&DealPairing),
+    progress: Option<&dyn Fn(u64, u64, u64, u64)>,
 ) -> Result<bool, SolveError> {
     use crate::game::Game;
     use crate::situation::Assignment;
@@ -630,6 +646,7 @@ pub fn deal_pairing(
             cancel: opts.cancel,
             cache_limit: opts.cache_limit,
             node_limit: opts.node_limit,
+            progress,
             ..DraftOptions::default()
         };
         let r = draft_search(&s, &draft_opts)?;
@@ -758,7 +775,7 @@ tasks:
         let cards: Vec<_> = ["win B4", "tricks =0", "no pink"].iter().map(|id| crate::catalogue::find(id).unwrap()).collect();
         let got = std::cell::RefCell::new(Vec::new());
         let note = |d: &DealPairing| got.borrow_mut().push(d.clone());
-        assert!(deal_pairing(&cards, 4, 6, 3, (0, 1), 2000, &Options::default(), &note).unwrap());
+        assert!(deal_pairing(&cards, 4, 6, 3, (0, 1), 2000, &Options::default(), &note, None).unwrap());
         let got = got.into_inner();
         assert_eq!(got.len(), 6);
         for d in &got {
@@ -776,7 +793,7 @@ tasks:
         let parts = std::cell::RefCell::new(0);
         let count = |_: &DealPairing| *parts.borrow_mut() += 1;
         for k in 0..2 {
-            deal_pairing(&cards, 4, 6, 3, (k, 2), 2000, &Options::default(), &count).unwrap();
+            deal_pairing(&cards, 4, 6, 3, (k, 2), 2000, &Options::default(), &count, None).unwrap();
         }
         assert_eq!(parts.into_inner(), 6);
     }
@@ -847,10 +864,10 @@ tasks:
     #[test]
     fn deal_robustness_of_an_easy_and_an_impossible_set() {
         let easy = [crate::catalogue::find("first-trick").unwrap()];
-        assert_eq!(deal_robustness(&easy, 4, 10, true, 1, (0, 1), &Options::default(), None), Some((10, 0, 10)));
+        assert_eq!(deal_robustness(&easy, 4, 10, true, 1, (0, 1), &Options::default(), None, None), Some((10, 0, 10)));
         let clash = [crate::catalogue::find("first-trick").unwrap(), crate::catalogue::find("first 2").unwrap()];
         // Same player may take both only with 2 tasks per seat; with 4 players each takes one.
-        assert_eq!(deal_robustness(&clash, 4, 5, true, 1, (0, 1), &Options::default(), None), Some((0, 0, 5)));
+        assert_eq!(deal_robustness(&clash, 4, 5, true, 1, (0, 1), &Options::default(), None, None), Some((0, 0, 5)));
     }
 
     #[test]
@@ -891,9 +908,26 @@ tasks:
         assert!(parts[1].any_works.is_none());
 
         let cards = [crate::catalogue::find("win B4").unwrap(), crate::catalogue::find("first 2").unwrap()];
-        let all = deal_robustness(&cards, 4, 12, true, 5, (0, 1), &Options::default(), None).unwrap();
-        let split: Vec<_> = (0..3).map(|k| deal_robustness(&cards, 4, 12, true, 5, (k, 3), &Options::default(), None).unwrap()).collect();
+        let all = deal_robustness(&cards, 4, 12, true, 5, (0, 1), &Options::default(), None, None).unwrap();
+        let split: Vec<_> = (0..3).map(|k| deal_robustness(&cards, 4, 12, true, 5, (k, 3), &Options::default(), None, None).unwrap()).collect();
         assert_eq!(split.iter().map(|r| r.0).sum::<usize>(), all.0);
         assert_eq!(split.iter().map(|r| r.2).sum::<usize>(), all.2);
+    }
+
+    #[test]
+    fn deal_outcomes_are_reported_per_deal() {
+        let cards = [crate::catalogue::find("win B4").unwrap(), crate::catalogue::find("first 2").unwrap()];
+        // A tiny node limit leaves deals open in the first pass; the second pass settles them.
+        let opts = Options { node_limit: Some(20), ..Options::default() };
+        let last = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        let note = |d: usize, x: Option<bool>| {
+            last.borrow_mut().insert(d, x);
+        };
+        let (ok, open, deals) = deal_robustness(&cards, 4, 12, true, 5, (0, 1), &opts, None, Some(&note)).unwrap();
+        let last = last.into_inner();
+        assert_eq!(last.len(), deals);
+        assert_eq!(last.values().filter(|x| **x == Some(true)).count(), ok);
+        assert_eq!(last.values().filter(|x| x.is_none()).count(), open);
+        assert_eq!(open, 0);
     }
 }

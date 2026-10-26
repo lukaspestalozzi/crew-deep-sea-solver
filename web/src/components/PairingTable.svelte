@@ -18,6 +18,9 @@
 <div class="pairing">
   <span class="small">{i18n.t('pairingStatus', { s: p.solvable, d: p.deals })}</span>
   {#if p.open}<span class="small muted">{i18n.t('pairingOpen', { n: p.open })}</span>{/if}
+  {#if p.openDrafts}
+    <span class="small muted">{i18n.t('pairingOpenDrafts', { pct: Math.round((100 * p.openDrafts) / p.drafts) })}</span>
+  {/if}
   {#if p.solvable && !p.pairs.length}
     <span class="small muted">{i18n.t('rulesNoPairs')}</span>
   {:else if p.pairs.length}

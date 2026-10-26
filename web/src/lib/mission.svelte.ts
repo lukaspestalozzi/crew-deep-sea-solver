@@ -258,12 +258,19 @@ class Mission {
   /** Share of random deals on which some draft works. */
   testDeals = () =>
     this.run(this.dealsJob, async () => {
-      type Part = { solvable: number; undecided: number; deals: number };
-      const parts = await this.pool.all<Part>('deal_robustness', [this.text, DEALS, seed()], (a, b) =>
-        this.dealsJob.report(i18n.t('dealsTested', { a, b })),
-      );
-      const sum = (f: (p: Part) => number) => parts.reduce((s, p) => s + f(p), 0);
-      this.robustness = { solvable: sum((p) => p.solvable), undecided: sum((p) => p.undecided), deals: sum((p) => p.deals) };
+      // Shown live: each deal is reported when decided or left open, and
+      // again when the second pass settles it.
+      const outcome = new Map<number, boolean | null>();
+      const tell = (e: unknown) => {
+        const { deal, solvable } = e as { deal: number; solvable: boolean | null };
+        outcome.set(deal, solvable);
+        const all = [...outcome.values()];
+        const open = all.filter((x) => x === null).length;
+        this.robustness = { solvable: all.filter((x) => x === true).length, undecided: open, deals: all.length };
+        this.dealsJob.report(i18n.t('dealsTested', { a: all.length, b: DEALS }) + (open ? ' · ' + i18n.t('dealsOpen', { n: open }) : ''));
+      };
+      this.robustness = null;
+      await this.pool.all('deal_robustness', [this.text, DEALS, seed()], undefined, tell);
     });
 
   /** Which tasks share a player in the working drafts of random deals. */
@@ -271,11 +278,20 @@ class Mission {
     this.run(this.pairingJob, async () => {
       this.pairing.reset();
       let done = 0;
+      // Draft count of the deals in progress, summed over the workers.
+      let current = [0, 0];
+      const show = () =>
+        this.pairingJob.report(i18n.t('pairingProgress', { d: done, n: DEALS, a: current[0], b: current[1] }));
       const tell = (d: unknown) => {
         this.pairing.push(d as DealPairingRow);
-        this.pairingJob.report(i18n.t('dealsTested', { a: ++done, b: DEALS }));
+        done++;
+        show();
       };
-      await this.pool.all<boolean>('deal_pairing', [this.text, DEALS, seed()], undefined, tell);
+      const progress = (a: number, b: number) => {
+        current = [a, b];
+        show();
+      };
+      await this.pool.all<boolean>('deal_pairing', [this.text, DEALS, seed()], progress, tell);
     });
 }
 
