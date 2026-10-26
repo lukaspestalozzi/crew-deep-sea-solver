@@ -2,33 +2,22 @@
   // Who takes which task, and which tasks go together, over the decided
   // drafts. Tapping a cell fixes that choice; every figure then narrows to the
   // drafts that make it.
+  import TrickList from './TrickList.svelte';
   import { draftStats, mark, type Count, type Filter } from '../lib/draftStats';
   import { i18n } from '../lib/i18n.svelte';
-  import type { DraftRow, PairConflict } from '../lib/solver';
+  import { mission } from '../lib/mission.svelte';
+  import type { DraftRow } from '../lib/solver';
   import { textOf } from '../lib/tasks';
   import type { Situation } from '../lib/wasm';
 
-  let {
-    situation,
-    rows,
-    open,
-    pairs,
-    busy,
-    onpick,
-    oncheckpairs,
-  }: {
-    situation: Situation;
-    rows: DraftRow[];
-    open: number;
-    pairs: PairConflict[] | null;
-    busy: boolean;
-    onpick: (r: DraftRow) => void;
-    oncheckpairs: () => void;
-  } = $props();
+  let { situation, rows, open }: { situation: Situation; rows: DraftRow[]; open: number } = $props();
 
+  const pairs = $derived(mission.pairs);
   /** The pair cannot share any player who could take both, even alone. */
   const clashAlone = (t1: number, t2: number) =>
     pairs?.some((c) => c.tasks[0] === t1 && c.tasks[1] === t2 && c.players.length === c.tried.length) ?? false;
+  /** A draft picked from the list, whose line is shown below it. */
+  let picked = $state<DraftRow | null>(null);
 
   let filter = $state<Filter>(new Map());
   let shown = $state(20);
@@ -60,8 +49,8 @@
       .join(' · ');
 </script>
 
-<div class="panel">
-  <span class="label">{i18n.t('whoTakesWhat')}</span>
+<div class="explorer">
+  <span class="small"><strong>{i18n.t('whoTakesWhat')}</strong></span>
   <span class="small muted">{i18n.t('explorerSub')}</span>
 
   {#if filter.size}
@@ -74,8 +63,8 @@
   {/if}
 
   <span class="small">
-    {stats.works.length ? i18n.t('worksOfAll', { w: stats.works.length, a: stats.all }) : i18n.t('noneWithChoice')}
-    {filter.size ? i18n.t('withChoice') : ''}
+    {stats.works.length || !filter.size ? i18n.t('worksOfAll', { w: stats.works.length, a: stats.all }) : i18n.t('noneWithChoice')}
+    {filter.size && stats.works.length ? i18n.t('withChoice') : ''}
   </span>
   {#if open > 0}<span class="small muted">{i18n.t('stillOpen', { n: open })}</span>{/if}
 
@@ -123,19 +112,6 @@
     {/each}
   {/if}
 
-  {#if pairs}
-    <span class="small"><strong>{pairs.length ? i18n.t('pairsClash') : i18n.t('pairsNone')}</strong></span>
-    {#each pairs as c}
-      <span class="small">
-        {letter(c.tasks[0])} + {letter(c.tasks[1])}{c.players.length < c.tried.length ? ': ' + c.players.map((p) => i18n.player(p)).join(', ') : ''}
-      </span>
-    {/each}
-  {:else}
-    <span class="pairs">
-      <span class="small muted">{i18n.t('pairsSub')}</span>
-      <button class="btn small outline-accent" disabled={busy} onclick={oncheckpairs}>{i18n.t('checkPairs')}</button>
-    </span>
-  {/if}
   {#if stats.tendencies.length}
     <span class="small"><strong>{i18n.t('tendencies')}</strong></span>
     {#each stats.tendencies as p}
@@ -148,7 +124,11 @@
   {#if stats.works.length}
     <span class="small" style="margin-top: 4px"><strong>{i18n.t('workingDrafts')}</strong></span>
     {#each stats.works.slice(0, shown) as r}
-      <button class="draft small" onclick={() => onpick(r)}>{summary(r)}</button>
+      <button class="draft small" class:open={picked === r} onclick={() => (picked = picked === r ? null : r)}>{summary(r)}</button>
+      {#if picked === r && r.tricks}
+        <span class="small muted">{i18n.t('lineForDraft')}</span>
+        <TrickList tricks={r.tricks} players={situation.hands.length} />
+      {/if}
     {/each}
     {#if stats.works.length > shown}
       <button class="btn small" onclick={() => (shown += 50)}>{i18n.t('showMore', { n: Math.min(50, stats.works.length - shown) })}</button>
@@ -157,12 +137,14 @@
 </div>
 
 <style>
-  .pairs {
+  .explorer {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    margin-top: 4px;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .draft.open {
+    outline: 2px solid var(--accent);
   }
   .wrap {
     flex-wrap: wrap;

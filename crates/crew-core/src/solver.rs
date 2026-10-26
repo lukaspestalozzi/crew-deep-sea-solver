@@ -251,8 +251,9 @@ pub type DraftDecisions = Vec<Decision>;
 /// round one search over all open drafts together may prove them all
 /// infeasible at once (or settle those its line completes). `progress` gets
 /// (feasible so far, still open); `decided` gets (draft index, decision) as
-/// each draft is settled. If cancelled, the drafts decided so far keep their
-/// answer and the rest are [`Decision::Open`].
+/// each draft is settled. If cancelled, or once the budget would exceed
+/// `opts.node_limit`, the drafts decided so far keep their answer and the
+/// rest are [`Decision::Open`].
 pub fn decide_drafts(
     s: &Situation,
     drafts: &[Vec<Owner>],
@@ -294,7 +295,8 @@ pub fn decide_drafts(
     let mut lines: Vec<Vec<Card>> = Vec::new();
     let mut open: Vec<usize> = (0..drafts.len()).collect();
     let mut found = 0;
-    let mut budget: u64 = 100_000;
+    let cap = opts.node_limit.unwrap_or(u64::MAX);
+    let mut budget: u64 = 100_000.min(cap);
     while !open.is_empty() {
         // Each open draft alone.
         let mut still = Vec::new();
@@ -349,7 +351,10 @@ pub fn decide_drafts(
             Verdict::Cancelled => return Ok(out),
             _ => {}
         }
-        budget = budget.saturating_mul(2);
+        if budget >= cap {
+            break;
+        }
+        budget = budget.saturating_mul(2).min(cap);
     }
     Ok(out)
 }
@@ -1656,6 +1661,37 @@ tasks:
             }
         }
         assert!(feasible > 50 && infeasible > 50, "{feasible} {infeasible}");
+    }
+
+    /// With a node limit per draft, drafts not settled within it stay open
+    /// and the others keep their answer.
+    #[test]
+    fn decide_drafts_honours_the_node_limit() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(53);
+        let mut open = 0;
+        for _ in 0..30 {
+            let s = random_open_situation(&mut rng, 4, 4, 3);
+            if redeal(&s).is_some() {
+                continue;
+            }
+            let g = s.game().unwrap();
+            let mut drafts = Vec::new();
+            crate::draft::for_each_draft(&s.tasks, 4, g.captain as usize, |o| {
+                drafts.push(o.to_vec());
+                true
+            });
+            let capped = decide_drafts(&s, &drafts, &Options { node_limit: Some(50), ..Options::default() }, None, None).unwrap();
+            let all = decide_drafts(&s, &drafts, &Options::default(), None, None).unwrap();
+            for (c, a) in capped.iter().zip(&all) {
+                match c {
+                    Decision::Open => open += 1,
+                    Decision::Works(_) => assert!(matches!(a, Decision::Works(_))),
+                    Decision::Fails => assert_eq!(a, &Decision::Fails),
+                }
+            }
+        }
+        assert!(open > 0);
     }
 
     /// A cancelled decision keeps the drafts decided before the cancel.

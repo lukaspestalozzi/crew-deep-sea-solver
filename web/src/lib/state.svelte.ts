@@ -22,7 +22,6 @@ class Session {
   mission = $state<number | null>(null);
   target = $state<number | null>(null);
   sealed = $state(false);
-  checkAllDrafts = $state(false);
   savedId = $state<string | null>(null);
 
   reset(mode: Mode, players = this.players) {
@@ -99,7 +98,6 @@ class Session {
       mission: this.mission,
       target: this.target,
       sealed: this.sealed,
-      checkAllDrafts: this.checkAllDrafts,
       savedId: this.savedId,
     };
   }

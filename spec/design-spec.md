@@ -40,6 +40,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D20 | Move order | Lookahead for leads (play the trick out) on top of a task-aware order that knows when later players are forced to beat a card; measured on 180 missions: feasible ones about 40% faster, impossibility proofs slightly slower, hard tail unchanged; remembering the best line across restarts and a fourth restart order were measured worse and dropped | Q's choice after the study (2026-10-25) |
 | D21 | Several cores in the browser | The draft count (also "check all other drafts") and "Test 100 deals" split their drafts or deals round-robin over one worker per core (cores − 1, at most 8); each worker searches its share with its own cache (4M positions split between them, at least 500k each) and the page sums the results; the verdict itself stays on one worker | Asked by Q (2026-10-25) |
 | D22 | Who takes which task | The draft count streams every decided draft to the page (a cancelled count keeps them); the page shows a task × player table, pairs always / never with the same player and the strongest tendencies (gap of at least 25 points, top 5), each compared with all drafts so that what the draft rules force is not reported; tapping a cell fixes that choice and narrows every figure; "check pairs alone" (each pair on one player without the other tasks) on demand; the CLI prints the same after `--count-drafts` | Planned with Q, options chosen by Q (2026-10-25) |
+| D23 | Result and Analysis screens | Result shows the verdict, why it fails and a winning line, plus a button to Analysis; Analysis has two tabs: "This deal" (drafts / other drafts with explorer and pair check, critical decisions) and "Random deals" (printed sum, "Test 100 deals", tasks together on random deals); each analysis is a card with what it answers, Compute, progress and Cancel; results kept across tabs and screens until the mission changes; the "also check all other drafts" switch is gone (its card is in "This deal"). Tasks together on random deals: this mission's task cards (rule cards left out, as in "Test 100 deals"), progressive, exact per deal within 1M positions per draft, undecided drafts left out and counted | Q found the result cluttered and asked for this question; options chosen by Q (2026-10-26) |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -192,11 +193,12 @@ Whichever way in, the task, owner and result screens are the same; only the inpu
 | Deal grid | Full deal on one screen | 5 colour columns × 9 values; pick a player, tap cards; last player gets the rest; captain from S4 |
 | Reconstruct | After an early fail | Enter played tricks card by card (the app knows whose turn it is, played cards greyed out), then cards still in hand |
 | Pick tasks | Choose the mission's tasks | Search, categories incl. rule cards, difficulty for the player count, running sum against the mission target, fill randomly |
-| Assign owners | Who took which task | Owner per task: `?` or Player1…Player5; draft rule shown; switch "also check all other drafts" |
-| Result: feasible | Verdict and proof | Winning line trick by trick, step-by-step replay, drafts that work, difficulty measures, save and export |
-| Result: not feasible | Verdict and explanation | Drafts that would work and the smallest fix, smallest conflict, point of no return (reconstructed games) |
+| Assign owners | Who took which task | Owner per task: `?` or Player1…Player5; draft rule shown |
+| Result: feasible | Verdict and proof | Winning line trick by trick, step-by-step replay, save and export, button to Analysis |
+| Result: not feasible | Verdict and explanation | Smallest conflict, point of no return (reconstructed games), button to Analysis |
+| Analysis | Analyses on demand | Tabs "This deal" (drafts that work or other drafts with the smallest fix, who takes which task, pair check, critical decisions) and "Random deals" (printed sum, test 100 deals, tasks together on random deals) |
 | Saved situations | Library | List with type and verdict; import file or pasted text; export sheet: share, download, copy |
-| Desk view | Desktop and exploration | Text editor beside result and draft table; explore mode for batches of random deals |
+| Desk view | Desktop and exploration | Text editor beside result and the Analysis tabs; explore mode for batches of random deals |
 
 **Live trick log:** optional during play. After "Record before play", one person taps each card as it is played; the app knows whose turn it is and who won. The grid never shows who holds which card, so the logger learns nothing; a card the current player doesn't hold is rejected. The log enables the point of no return for every mission, also late fails.
 

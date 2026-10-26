@@ -70,14 +70,6 @@
     <div class="error">{info.error}</div>
   {/if}
 
-  <label class="panel row between" style="flex-direction: row">
-    <span style="display: flex; flex-direction: column; gap: 2px">
-      {i18n.t('checkAllDrafts')}
-      <span class="small muted">{i18n.t('checkAllDraftsSub')}</span>
-    </span>
-    <input type="checkbox" bind:checked={session.checkAllDrafts} style="width: 24px; height: 24px; accent-color: var(--accent)" />
-  </label>
-
   <div class="grow"></div>
   <button class="btn primary" disabled={'error' in info} onclick={() => router.go('/result')}>{i18n.t('analyse')}</button>
 </main>

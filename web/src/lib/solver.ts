@@ -7,7 +7,8 @@ type Pending = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   progress?: (...p: number[]) => void;
-  decided?: (d: DraftRow) => void;
+  /** Items streamed by the call (decided drafts, deals). */
+  decided?: (d: unknown) => void;
 };
 
 export class Cancelled extends Error {
@@ -46,7 +47,7 @@ export class SolverClient {
     return worker;
   }
 
-  call<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: DraftRow) => void): Promise<T> {
+  call<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T> {
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress, decided });
@@ -73,7 +74,13 @@ export const CORES = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2
 export class SolverPool {
   private clients: SolverClient[] = [];
 
-  all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: DraftRow) => void): Promise<T[]> {
+  /** A single call on the first worker. */
+  one<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T> {
+    if (!this.clients.length) this.clients.push(new SolverClient());
+    return this.clients[0].call<T>(fn, args, progress);
+  }
+
+  all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T[]> {
     while (this.clients.length < CORES) this.clients.push(new SolverClient());
     const n = this.clients.length;
     const last: number[][] = Array.from({ length: n }, () => []);

@@ -10,6 +10,7 @@
   import Result from './screens/Result.svelte';
   import Library from './screens/Library.svelte';
   import Desk from './screens/Desk.svelte';
+  import Analysis from './screens/Analysis.svelte';
 
   // Keep the work in progress across reloads.
   try {
@@ -46,6 +47,8 @@
   <Result />
 {:else if router.path === '/library'}
   <Library />
+{:else if router.path === '/analysis'}
+  <Analysis />
 {:else if router.path === '/desk'}
   <Desk />
 {:else}

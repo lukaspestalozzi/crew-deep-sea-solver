@@ -1,5 +1,6 @@
 <script lang="ts">
   import ResultView from '../components/ResultView.svelte';
+  import AnalysisView from '../components/AnalysisView.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { router, session } from '../lib/state.svelte';
   import { check, parse, toText } from '../lib/wasm';
@@ -29,7 +30,6 @@ Player1: first-trick
 
   let text = $state(initial());
   let analysed = $state<string | null>(null);
-  let checkAll = $state(false);
 
   const status = $derived.by(() => {
     const r = check(text);
@@ -78,10 +78,6 @@ Player1: first-trick
       {:else if 'error' in status}
         <div class="error">{status.error}</div>
       {/if}
-      <label class="row small">
-        <input type="checkbox" bind:checked={checkAll} style="accent-color: var(--accent)" />
-        {i18n.t('checkAllDrafts')}
-      </label>
       <div class="row">
         <button class="btn primary" disabled={'error' in status} onclick={() => (analysed = text)}>{i18n.t('analyse')}</button>
         <button class="btn" disabled={'error' in status} onclick={openInApp}>{i18n.t('loadIntoApp')}</button>
@@ -90,9 +86,9 @@ Player1: first-trick
     <section>
       <span class="label">{i18n.t('result')}</span>
       {#if analysed}
-        {#key analysed + checkAll}
-          <ResultView text={analysed} {checkAll} />
-        {/key}
+        <ResultView text={analysed} />
+        <span class="label" style="margin-top: 12px">{i18n.t('analysis')}</span>
+        <AnalysisView />
       {/if}
     </section>
   </div>

@@ -563,6 +563,51 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32,
     }
 }
 
+/// Which tasks share a player in the working drafts of random deals (same
+/// task cards, rule cards left out as in [`deal_robustness`]). Every n-th of
+/// `deals` deals from `part`; `on_deal` gets each deal as JSON: {works,
+/// decided, open, same: [[i, j, working, decided]], always, never}, with i, j
+/// task indices of the situation. Returns true, or false if cancelled.
+#[wasm_bindgen]
+pub fn deal_pairing(text: &str, deals: u32, seed: u32, part: u32, parts: u32, on_deal: JsValue) -> String {
+    let cb = progress_fn(&on_deal);
+    let tell = |d: String| {
+        if let Some(f) = &cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&d));
+        }
+    };
+    deal_pairing_impl(text, deals, seed, (part as usize, parts as usize), &tell)
+}
+
+pub fn deal_pairing_impl(text: &str, deals: u32, seed: u32, part: (usize, usize), tell: &dyn Fn(String)) -> String {
+    let s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    // Index in the situation of each task card used.
+    let index: Vec<usize> = (0..s.tasks.len()).filter(|&i| !s.tasks[i].card.is_rule()).collect();
+    let cards: Vec<_> = index.iter().map(|&i| s.tasks[i].card).collect();
+    let pair = |&(i, j): &(usize, usize)| json!([index[i], index[j]]);
+    let note = |d: &analysis::DealPairing| {
+        tell(
+            json!({
+                "works": d.works,
+                "decided": d.decided,
+                "open": d.open,
+                "same": d.same.iter().map(|&(i, j, w, a)| json!([index[i], index[j], w, a])).collect::<Vec<_>>(),
+                "always": d.always.iter().map(pair).collect::<Vec<_>>(),
+                "never": d.never.iter().map(pair).collect::<Vec<_>>(),
+            })
+            .to_string(),
+        )
+    };
+    let opts = Options { node_limit: Some(1_000_000), cache_limit: cache_share(part.1 as u32), ..Options::default() };
+    match analysis::deal_pairing(&cards, s.players(), deals as usize, seed as u64, part, 2000, &opts, &note) {
+        Ok(done) => ok(json!(done)),
+        Err(e) => err(e),
+    }
+}
+
 /// A random deal with task cards drawn to the difficulty `target` (owners `?`), as text.
 #[wasm_bindgen]
 pub fn random_situation(players: u32, target: u32, seed: u32) -> String {
@@ -648,6 +693,19 @@ Player2: win B4
         assert!(list.iter().filter(|x| x["status"] == "works").all(|x| !x["line"].as_array().unwrap().is_empty()));
         let bad: Value = serde_json::from_str(&parse("crew 2")).unwrap();
         assert_eq!(bad["error"]["line"], 1);
+    }
+
+    #[test]
+    fn deal_pairing_returns_one_json_per_deal() {
+        let got = std::cell::RefCell::new(Vec::<Value>::new());
+        let tell = |x: String| got.borrow_mut().push(serde_json::from_str(&x).unwrap());
+        let text = TEXT.replace("Player2: win B4", "?: win B4");
+        let r: Value = serde_json::from_str(&deal_pairing_impl(&text, 3, 7, (0, 1), &tell)).unwrap();
+        assert_eq!(r["ok"], true);
+        let got = got.into_inner();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0]["same"][0][0], 0);
+        assert_eq!(got[0]["same"][0][1], 1);
     }
 
     #[test]

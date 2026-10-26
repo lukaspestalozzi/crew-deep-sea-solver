@@ -3,7 +3,7 @@
   import ResultView from '../components/ResultView.svelte';
   import ExportSheet from '../components/ExportSheet.svelte';
   import { i18n } from '../lib/i18n.svelte';
-  import { session } from '../lib/state.svelte';
+  import { router, session } from '../lib/state.svelte';
   import { saveCurrent } from '../lib/saved';
   import { toText } from '../lib/wasm';
 
@@ -28,7 +28,13 @@
 <main class="screen">
   <Header title={i18n.t('result')} back="/owners" />
   {#if text}
-    <ResultView {text} checkAll={session.checkAllDrafts} onverdict={(v) => (verdict = v)} />
+    <ResultView {text} onverdict={(v) => (verdict = v)}>
+      {#snippet actions()}
+        {#if verdict === 'feasible' || verdict === 'infeasible'}
+          <button class="btn" onclick={() => router.go('/analysis')}>{i18n.t('openAnalysis')}</button>
+        {/if}
+      {/snippet}
+    </ResultView>
   {/if}
   <div class="grow"></div>
   <div class="cols-2">

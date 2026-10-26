@@ -129,7 +129,14 @@ The grammar is in `crates/crew-core/src/generate.rs`.
 
 ## Web app
 
-After "Drafts that work", the result shows **who takes which task**: a task × player table (share of working drafts in which that player has the task, "must" / "never"), task pairs always or never with the same player and the strongest tendencies, and the working drafts (tap one for its winning line). Tapping a cell fixes that choice and narrows every figure, like drafting in turn. Drafts arrive while the count runs, so a cancelled count keeps what it found. "Check pairs alone" gives each pair of tasks to one player without the other tasks, to tell "these two never fit together" from "only in this mission".
+The **Result** screen gives the answer only: verdict, why it fails (smallest conflict, point of no return) or a winning line. Everything that is computed on demand is on the **Analysis** screen (in the desk view below the result), in two tabs:
+
+- **This deal:** the drafts that work (or, with owners entered, whether another draft would have worked, and the smallest fix), who takes which task, and critical decisions / tightness.
+- **Random deals** (same tasks, new deals): on how many some draft works ("Test 100 deals"), and **which tasks sit together on random deals**: per pair of tasks, the share of working drafts with both on one player, averaged over the solvable deals, next to the share among all drafts, and in how many deals the pair is always or never on one player. It runs deal after deal (a full draft count per deal, at most 1M positions per draft) and can be stopped at any time.
+
+Results stay while switching tabs or screens and reset when the mission changes.
+
+After "Drafts that work", the card shows **who takes which task**: a task × player table (share of working drafts in which that player has the task, "must" / "never"), task pairs always or never with the same player and the strongest tendencies, and the working drafts (tap one for its winning line). Tapping a cell fixes that choice and narrows every figure, like drafting in turn. Drafts arrive while the count runs, so a cancelled count keeps what it found. "Check pairs alone" gives each pair of tasks to one player without the other tasks, to tell "these two never fit together" from "only in this mission".
 
 ```sh
 rustup target add wasm32-unknown-unknown

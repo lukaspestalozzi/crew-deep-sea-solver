@@ -51,6 +51,8 @@ pub struct DraftOptions<'a> {
     pub part: (usize, usize),
     /// Lost positions kept per search (see [`Options::cache_limit`]).
     pub cache_limit: usize,
+    /// Nodes at most per draft; drafts not settled within it stay open.
+    pub node_limit: Option<u64>,
     /// Called with each draft of this part (owners, decision) as it is
     /// settled, so a caller that is stopped keeps what was found.
     pub decided: Option<&'a OnDecided<'a>>,
@@ -69,6 +71,7 @@ impl Default for DraftOptions<'_> {
             progress: None,
             part: (0, 1),
             cache_limit: Options::default().cache_limit,
+            node_limit: None,
             decided: None,
         }
     }
@@ -84,7 +87,7 @@ fn distance(a: &[Owner], b: &[Owner]) -> usize {
 pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     let (n, captain) = (g.n, g.captain as usize);
-    let solve_opts = Options { cancel: opts.cancel, cache_limit: opts.cache_limit, ..Options::default() };
+    let solve_opts = Options { cancel: opts.cancel, cache_limit: opts.cache_limit, node_limit: opts.node_limit, ..Options::default() };
 
     let (part, parts) = (opts.part.0, opts.part.1.max(1));
     let (any_works, one_tree_example) = if part != 0 {
@@ -574,6 +577,91 @@ pub fn deal_robustness(
     Some((ok, open.len(), mine))
 }
 
+/// One random deal of a task set: which tasks share a player in the drafts
+/// that work, compared with all drafts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DealPairing {
+    /// Drafts that work, decided drafts, drafts left open (node limit).
+    pub works: usize,
+    pub decided: usize,
+    pub open: usize,
+    /// Per pair of tasks (i < j, indices into the task set): (working drafts,
+    /// decided drafts) in which both have the same owner.
+    pub same: Vec<(usize, usize, usize, usize)>,
+    /// Pairs always / never with the same player, as in [`draft_relations`].
+    pub always: Vec<(usize, usize)>,
+    pub never: Vec<(usize, usize)>,
+}
+
+/// For each random deal of the task set (owners `?`): every draft decided
+/// (sampled above `limit`), then [`DealPairing`]. `part` (k, n): every n-th
+/// deal from k. `on_deal` gets each deal's result as it is done. Returns
+/// false if cancelled.
+#[allow(clippy::too_many_arguments)]
+pub fn deal_pairing(
+    cards: &[&'static crate::catalogue::TaskCard],
+    players: usize,
+    deals: usize,
+    seed: u64,
+    part: (usize, usize),
+    limit: u64,
+    opts: &Options,
+    on_deal: &dyn Fn(&DealPairing),
+) -> Result<bool, SolveError> {
+    use crate::game::Game;
+    use crate::situation::Assignment;
+    let cancelled = || opts.cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+    let mut rng = Rng::new(seed);
+    let parts = part.1.max(1);
+    for d in 0..deals {
+        // Every part draws all deals (same sequence) and decides its share.
+        let hands = Game::random_hands(players, &mut rng);
+        if d % parts != part.0 {
+            continue;
+        }
+        let s = Situation {
+            hands,
+            tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
+            ..Situation::default()
+        };
+        let draft_opts = DraftOptions {
+            limit,
+            seed: seed ^ d as u64,
+            cancel: opts.cancel,
+            cache_limit: opts.cache_limit,
+            node_limit: opts.node_limit,
+            ..DraftOptions::default()
+        };
+        let r = draft_search(&s, &draft_opts)?;
+        if cancelled() {
+            return Ok(false);
+        }
+        let rows: Vec<(&Vec<Owner>, bool)> = r
+            .drafts
+            .iter()
+            .filter(|(_, d)| *d != Decision::Open)
+            .map(|(o, d)| (o, matches!(d, Decision::Works(_))))
+            .collect();
+        let mut same = Vec::new();
+        for i in 0..cards.len() {
+            for j in i + 1..cards.len() {
+                let (w, a) = rows.iter().filter(|x| x.0[i] == x.0[j]).fold((0, 0), |(w, a), x| (w + x.1 as usize, a + 1));
+                same.push((i, j, w, a));
+            }
+        }
+        let rel = draft_relations(&r.drafts);
+        on_deal(&DealPairing {
+            works: r.working as usize,
+            decided: rows.len(),
+            open: r.undecided as usize,
+            same,
+            always: rel.always_together,
+            never: rel.never_together,
+        });
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,6 +751,34 @@ tasks:
         with_open.push((vec![p(0), p(0), p(0), Owner::Crew], Decision::Open));
         assert_eq!(draft_relations(&with_open), draft_relations(&ruled));
         assert!(draft_relations(&ruled).never_together.is_empty());
+    }
+
+    #[test]
+    fn deal_pairing_agrees_with_the_draft_count_per_deal() {
+        let cards: Vec<_> = ["win B4", "tricks =0", "no pink"].iter().map(|id| crate::catalogue::find(id).unwrap()).collect();
+        let got = std::cell::RefCell::new(Vec::new());
+        let note = |d: &DealPairing| got.borrow_mut().push(d.clone());
+        assert!(deal_pairing(&cards, 4, 6, 3, (0, 1), 2000, &Options::default(), &note).unwrap());
+        let got = got.into_inner();
+        assert_eq!(got.len(), 6);
+        for d in &got {
+            assert_eq!(d.open, 0);
+            assert_eq!(d.same.len(), 3);
+            // "win B4" and "win no tricks" never work on one player.
+            let (_, _, w, _) = d.same.iter().find(|x| (x.0, x.1) == (0, 1)).unwrap();
+            assert_eq!(*w, 0);
+            for &(_, _, w, a) in &d.same {
+                assert!(w <= d.works && a <= d.decided && w <= a);
+            }
+        }
+        assert!(got.iter().any(|d| d.works > 0));
+        // Parts see the same deals.
+        let parts = std::cell::RefCell::new(0);
+        let count = |_: &DealPairing| *parts.borrow_mut() += 1;
+        for k in 0..2 {
+            deal_pairing(&cards, 4, 6, 3, (k, 2), 2000, &Options::default(), &count).unwrap();
+        }
+        assert_eq!(parts.into_inner(), 6);
     }
 
     #[test]
