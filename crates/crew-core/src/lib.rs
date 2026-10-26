@@ -10,5 +10,6 @@ pub mod generate;
 pub mod notation;
 pub mod rng;
 pub mod situation;
+pub mod trace;
 pub mod solver;
 pub mod task;

@@ -3,12 +3,14 @@ import init, * as w from '../wasm/crew_wasm.js';
 
 const ready = init();
 
-type Call = { id: number; fn: string; args: unknown[] };
+type Call = { id: number; fn: string; args: unknown[]; trace?: boolean };
 
 self.onmessage = async (e: MessageEvent<Call>) => {
   await ready;
-  const { id, fn, args } = e.data;
+  const { id, fn, args, trace } = e.data;
   const progress = (...p: number[]) => postMessage({ id, progress: p });
+  // Trace events, stamped with the time here (the solver has no clock).
+  w.set_trace(trace ? (ev: string) => postMessage({ id, trace: { ...JSON.parse(ev), t: performance.now() + performance.timeOrigin } }) : null);
   const decided = (draft: string) => postMessage({ id, decided: JSON.parse(draft) });
   let out: string;
   try {

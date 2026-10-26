@@ -53,6 +53,8 @@ pub struct DraftOptions<'a> {
     pub cache_limit: usize,
     /// Nodes at most per draft; drafts not settled within it stay open.
     pub node_limit: Option<u64>,
+    /// Report the searches (see [`crate::trace`]).
+    pub trace: Option<crate::trace::Trace<'a>>,
     /// Called with each draft of this part (owners, decision) as it is
     /// settled, so a caller that is stopped keeps what was found.
     pub decided: Option<&'a OnDecided<'a>>,
@@ -72,6 +74,7 @@ impl Default for DraftOptions<'_> {
             part: (0, 1),
             cache_limit: Options::default().cache_limit,
             node_limit: None,
+            trace: None,
             decided: None,
         }
     }
@@ -87,13 +90,14 @@ fn distance(a: &[Owner], b: &[Owner]) -> usize {
 pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     let (n, captain) = (g.n, g.captain as usize);
-    let solve_opts = Options { cancel: opts.cancel, cache_limit: opts.cache_limit, node_limit: opts.node_limit, ..Options::default() };
+    let solve_opts =
+        Options { cancel: opts.cancel, cache_limit: opts.cache_limit, node_limit: opts.node_limit, trace: opts.trace, ..Options::default() };
 
     let (part, parts) = (opts.part.0, opts.part.1.max(1));
     let (any_works, one_tree_example) = if part != 0 {
         (None, None)
     } else {
-        match solver::solve_drafts(s, &solve_opts)? {
+        match solver::solve_drafts(s, &solve_opts.labelled("does some draft work?"))? {
             (Verdict::Feasible(line), Some(owners), _) => (Some(true), Some((owners, line))),
             (Verdict::Infeasible | Verdict::Redeal(_), _, _) => (Some(false), None),
             _ => (None, None),
@@ -113,7 +117,8 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
             }
             let mut single = s.clone();
             single.tasks = vec![crate::situation::Assignment { card: a.card, owner: Owner::Player(p as u8) }];
-            if let Ok((Verdict::Infeasible, _)) = solver::solve(&single, &solve_opts) {
+            let label = format!("alone: {} · Player{}", a.card.id, p + 1);
+            if let Ok((Verdict::Infeasible, _)) = solver::solve(&single, &solve_opts.labelled(&label)) {
                 impossible[i][p] = true;
                 impossible_pairs.push((i, p));
             }
@@ -178,7 +183,8 @@ pub fn draft_search(s: &Situation, opts: &DraftOptions) -> Result<DraftReport, S
             f(&rest[i], d);
         }
     };
-    let mut decided = solver::decide_drafts(s, &rest, &solve_opts, Some(&tell), Some(&note))?.into_iter();
+    let label = format!("{} drafts", rest.len());
+    let mut decided = solver::decide_drafts(s, &rest, &solve_opts.labelled(&label), Some(&tell), Some(&note))?.into_iter();
     for owners in drafts {
         let d = if bad(&owners) { Decision::Fails } else { decided.next().expect("one decision per draft") };
         match &d {
@@ -303,7 +309,10 @@ pub fn pair_conflicts(
     };
     // None: cancelled.
     let feasible = |tasks: &[usize], p: usize| -> Result<Option<bool>, SolveError> {
-        Ok(match solver::solve(&with(tasks, p), opts)?.0 {
+        let ids: Vec<&str> = tasks.iter().map(|&i| s.tasks[i].card.id.as_str()).collect();
+        let label = format!("{} · Player{}", ids.join(" + "), p + 1);
+        let o = Options { trace: opts.trace.map(|t| t.labelled(&label)), ..opts.clone() };
+        Ok(match solver::solve(&with(tasks, p), &o)?.0 {
             Verdict::Feasible(_) => Some(true),
             Verdict::Infeasible | Verdict::Redeal(_) => Some(false),
             _ => None,
@@ -560,7 +569,8 @@ pub fn deal_robustness(
             tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
             ..Situation::default()
         };
-        match solver::solve_drafts(&s, opts) {
+        let label = format!("deal {}/{deals}", d + 1);
+        match solver::solve_drafts(&s, &Options { trace: opts.trace.map(|t| t.labelled(&label)), ..opts.clone() }) {
             Ok((Verdict::Feasible(_), _, _)) => {
                 ok += 1;
                 tell(d, Some(true));
@@ -575,7 +585,8 @@ pub fn deal_robustness(
     }
     if settle {
         while let Some((d, s)) = open.pop() {
-            match solver::solve_drafts(&s, &Options { node_limit: None, ..opts.clone() }) {
+            let label = format!("deal {}/{deals} · to the end", d + 1);
+            match solver::solve_drafts(&s, &Options { node_limit: None, trace: opts.trace.map(|t| t.labelled(&label)), ..opts.clone() }) {
                 Ok((Verdict::Feasible(_), _, _)) => {
                     ok += 1;
                     tell(d, Some(true));
@@ -640,6 +651,8 @@ pub fn deal_pairing(
             tasks: cards.iter().map(|&card| Assignment { card, owner: Owner::Unknown }).collect(),
             ..Situation::default()
         };
+        let label = format!("deal {}/{deals}", d + 1);
+        let unit = opts.trace.map(|t| t.start(&label, &s));
         let draft_opts = DraftOptions {
             limit,
             seed: seed ^ d as u64,
@@ -647,9 +660,18 @@ pub fn deal_pairing(
             cache_limit: opts.cache_limit,
             node_limit: opts.node_limit,
             progress,
+            trace: opts.trace.zip(unit).map(|(t, u)| t.child(u, "search")),
             ..DraftOptions::default()
         };
-        let r = draft_search(&s, &draft_opts)?;
+        let r = draft_search(&s, &draft_opts);
+        if let (Some(t), Some(u)) = (opts.trace, unit) {
+            let summary = match &r {
+                Ok(r) => format!("{} of {} work, {} open", r.working, r.drafts.len(), r.undecided),
+                Err(e) => format!("error: {e}"),
+            };
+            t.end(u, &summary, None);
+        }
+        let r = r?;
         if cancelled() {
             return Ok(false);
         }
@@ -912,6 +934,44 @@ tasks:
         let split: Vec<_> = (0..3).map(|k| deal_robustness(&cards, 4, 12, true, 5, (k, 3), &Options::default(), None, None).unwrap()).collect();
         assert_eq!(split.iter().map(|r| r.0).sum::<usize>(), all.0);
         assert_eq!(split.iter().map(|r| r.2).sum::<usize>(), all.2);
+    }
+
+    /// Trace events nest: every unit ends, after its children; progress and
+    /// children refer to units that are open.
+    #[test]
+    fn trace_events_nest() {
+        use crate::trace::{Event, Trace};
+        let log = std::cell::RefCell::new(Vec::new());
+        let sink = |e: &Event| {
+            log.borrow_mut().push(match e {
+                Event::Start { id, parent, label, .. } => ("start", *id, *parent, label.to_string()),
+                Event::Progress { id, .. } => ("progress", *id, None, String::new()),
+                Event::End { id, result, .. } => ("end", *id, None, result.to_string()),
+            })
+        };
+        let cards = [crate::catalogue::find("win B4").unwrap(), crate::catalogue::find("tricks =2").unwrap()];
+        let opts = Options { trace: Some(Trace::new(&sink)), ..Options::default() };
+        deal_pairing(&cards, 4, 2, 9, (0, 1), 2000, &opts, &|_| {}, None).unwrap();
+        let log = log.into_inner();
+        let mut open: Vec<u64> = Vec::new();
+        let mut deals = 0;
+        for (ev, id, parent, label) in &log {
+            match *ev {
+                "start" => {
+                    assert_eq!(*parent, open.last().copied(), "{label}");
+                    if label.starts_with("deal ") {
+                        deals += 1;
+                    }
+                    open.push(*id);
+                }
+                "progress" => assert!(open.contains(id)),
+                _ => assert_eq!(open.pop(), Some(*id)),
+            }
+        }
+        assert!(open.is_empty());
+        assert_eq!(deals, 2);
+        assert!(log.iter().any(|x| x.3.starts_with("draft ")), "searches of single drafts are labelled");
+        assert!(log.iter().any(|x| x.0 == "end" && x.3 == "feasible"));
     }
 
     #[test]

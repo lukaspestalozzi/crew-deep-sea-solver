@@ -35,6 +35,7 @@ cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
 - `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
+- `--trace OUT`: write every search as JSON lines (start with the situation, progress about every million positions and at each restart, end with verdict and statistics; `t` in ms), the format of the web app's Details view.
 - `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once. Then prints who takes what: owners every working draft has ("must") or none has ("never"), task pairs always or never with the same player, and the strongest tendencies, each compared with all drafts so that what the draft rules force is left out.
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
 - `--dfs`, `--best-first`, `--task-aware`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
@@ -135,6 +136,8 @@ The **Result** screen gives the answer only: verdict, why it fails (smallest con
 - **Random deals** (same tasks, new deals): on how many some draft works ("Test 100 deals"), and **which tasks sit together on random deals**: per pair of tasks, the share of working drafts with both on one player, averaged over the solvable deals, next to the share among all drafts, and in how many deals the pair is always or never on one player. It runs deal after deal (a full draft count per deal, at most 1M positions per draft) and can be stopped at any time.
 
 Results stay while switching tabs or screens and reset when the mission changes.
+
+**Details (Inspector):** a switch on the Analysis screen shows, under each card, what the solver works on: one row per search or group of searches (a deal, a draft count) with its path ("deal 3/100 › 120 drafts › draft 12/120 · budget 400000"), state or verdict, time, positions, positions per second, restart and budget, cache size. Each row can be exported as the exact situation searched (`crew 1` text) or opened in the desk view. Searches running longer than a threshold (default 2 min, adjustable) are kept in a slow-case log on the device; "Export all" gives one file for `crew bench --load`. The rows come from the solver's trace events (`crew_core::trace`), the same stream `crew … --trace OUT` writes as JSON lines; a bot will add its decision events to it. In the browser console, `crewInspector.rows` holds the rows.
 
 After "Drafts that work", the card shows **who takes which task**: a task × player table (share of working drafts in which that player has the task, "must" / "never"), task pairs always or never with the same player and the strongest tendencies, and the working drafts (tap one for its winning line). Tapping a cell fixes that choice and narrows every figure, like drafting in turn. Drafts arrive while the count runs, so a cancelled count keeps what it found. "Check pairs alone" gives each pair of tasks to one player without the other tasks, to tell "these two never fit together" from "only in this mission".
 

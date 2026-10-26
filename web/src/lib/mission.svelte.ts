@@ -4,6 +4,7 @@
 // runs on its own worker; the analyses on demand share a worker pool and run
 // one at a time.
 import { i18n } from './i18n.svelte';
+import { inspector } from './inspector.svelte';
 import type { DealPairingRow } from './pairing';
 import {
   Cancelled,
@@ -17,6 +18,7 @@ import {
   type SolveDraftsOut,
   type SolveOut,
   type TightnessOut,
+  type TraceEvent,
 } from './solver';
 import { check, parse, toText, type Situation } from './wasm';
 
@@ -27,6 +29,8 @@ export const DEALS = 100;
 
 /** State of one computation: progress, cancel, error. */
 export class Job {
+  /** Name in the Inspector's work lists. */
+  constructor(readonly name: string) {}
   running = $state(false);
   progress = $state('');
   /** Last progress line, kept to show what was known when cancelled. */
@@ -85,27 +89,27 @@ class Mission {
   redeal = $state<string | null>(null);
 
   // Verdict and its explanations.
-  verdictJob = new Job();
+  verdictJob = new Job('verdict');
   solveOut = $state<SolveOut | null>(null);
   draftsOut = $state<SolveDraftsOut | null>(null);
   conflict = $state<number[] | null>(null);
   noReturn = $state<NoReturnOut>(null);
 
   // This deal.
-  draftsJob = new Job();
+  draftsJob = new Job('drafts');
   drafts = $state<DraftsOut | null>(null);
   rows = new Stream<DraftRow>();
   /** Drafts the count plans to decide (sample or all). */
   planned = $state(0);
-  pairsJob = new Job();
+  pairsJob = new Job('pairs');
   pairs = $state<PairConflict[] | null>(null);
-  tightJob = new Job();
+  tightJob = new Job('tightness');
   tight = $state<TightnessOut | null>(null);
 
   // Random deals.
-  dealsJob = new Job();
+  dealsJob = new Job('deals');
   robustness = $state<{ solvable: number; undecided: number; deals: number } | null>(null);
-  pairingJob = new Job();
+  pairingJob = new Job('pairing');
   pairing = new Stream<DealPairingRow>();
 
   /** Some owner is `?`: the verdict is over all drafts. */
@@ -134,6 +138,7 @@ class Mission {
     this.text = text;
     this.client.cancel();
     this.pool.cancel();
+    inspector.reset();
     for (const j of [this.verdictJob, this.draftsJob, this.pairsJob, this.tightJob, this.dealsJob, this.pairingJob]) j.reset();
     this.situation = this.redeal = null;
     this.solveOut = this.draftsOut = this.drafts = null;
@@ -153,6 +158,9 @@ class Mission {
       return;
     }
     const s = (this.situation = p.ok[0]);
+    inspector.mission = s.title ?? '';
+    const sink = inspector.on ? inspector.sink(this.verdictJob.name) : null;
+    const trace = sink ? (e: TraceEvent) => sink(0, e) : undefined;
     const c = check(text);
     if ('error' in c) {
       job.error = c.error.msg;
@@ -167,9 +175,9 @@ class Mission {
     const nodes = (k: number) => job.report(i18n.t('positions', { n: (k / 1e6).toFixed(0) + 'M' }));
     try {
       if (this.unknownOwners) {
-        this.draftsOut = await this.client.call<SolveDraftsOut>('solve_drafts', [text], nodes);
+        this.draftsOut = await this.client.call<SolveDraftsOut>('solve_drafts', [text], nodes, undefined, trace);
       } else {
-        this.solveOut = await this.client.call<SolveOut>('solve', [text], nodes);
+        this.solveOut = await this.client.call<SolveOut>('solve', [text], nodes, undefined, trace);
         if (this.solveOut.verdict === 'infeasible') {
           this.conflict = await this.client.call<number[] | null>('conflict', [text]);
           if (s.played.length) this.noReturn = await this.client.call<NoReturnOut>('no_return', [text]);
@@ -185,6 +193,7 @@ class Mission {
 
   cancelVerdict() {
     this.client.cancel();
+    inspector.stopRunning(this.verdictJob.name);
     this.verdictJob.running = false;
     this.verdictJob.cancelled = true;
   }
@@ -194,6 +203,7 @@ class Mission {
     if (this.busy) return;
     job.reset();
     job.running = true;
+    this.pool.trace = inspector.on ? inspector.sink(job.name) : null;
     try {
       await f();
     } catch (e) {
@@ -202,6 +212,7 @@ class Mission {
     }
     this.rows.flush();
     this.pairing.flush();
+    inspector.stopRunning(job.name);
     job.running = false;
     job.progress = '';
   }

@@ -9,7 +9,14 @@ type Pending = {
   progress?: (...p: number[]) => void;
   /** Items streamed by the call (decided drafts, deals). */
   decided?: (d: unknown) => void;
+  trace?: (e: TraceEvent) => void;
 };
+
+/** A solver trace event (see crew_core::trace), with the time it was sent (ms since 1970). */
+export type TraceEvent =
+  | { ev: 'start'; id: number; parent: number | null; label: string; text: string; t: number }
+  | { ev: 'progress'; id: number; nodes: number; restart: number; budget: number; cache: number; t: number }
+  | { ev: 'end'; id: number; result: string; stats: { nodes: number; cache_hits: number; cache_size: number } | null; t: number };
 
 export class Cancelled extends Error {
   constructor() {
@@ -29,7 +36,7 @@ export class SolverClient {
   private spawn(): Worker {
     const worker = new SolverWorker();
     worker.onmessage = (e: MessageEvent) => {
-      const { id, progress, decided, result } = e.data;
+      const { id, progress, decided, trace, result } = e.data;
       const p = this.pending.get(id);
       if (!p) return;
       if (progress) {
@@ -40,6 +47,10 @@ export class SolverClient {
         p.decided?.(decided);
         return;
       }
+      if (trace) {
+        p.trace?.(trace);
+        return;
+      }
       this.pending.delete(id);
       if (result && 'error' in result) p.reject(new Error(result.error.msg));
       else p.resolve(result.ok);
@@ -47,11 +58,17 @@ export class SolverClient {
     return worker;
   }
 
-  call<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T> {
+  call<T>(
+    fn: string,
+    args: unknown[],
+    progress?: (...p: number[]) => void,
+    decided?: (d: unknown) => void,
+    trace?: (e: TraceEvent) => void,
+  ): Promise<T> {
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress, decided });
-      this.worker.postMessage({ id, fn, args });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress, decided, trace });
+      this.worker.postMessage({ id, fn, args, trace: !!trace });
     });
   }
 
@@ -73,11 +90,18 @@ export const CORES = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 2
  */
 export class SolverPool {
   private clients: SolverClient[] = [];
+  /** If set, every call reports trace events (worker index, event). */
+  trace: ((worker: number, e: TraceEvent) => void) | null = null;
+
+  private traceOf(k: number) {
+    const t = this.trace;
+    return t ? (e: TraceEvent) => t(k, e) : undefined;
+  }
 
   /** A single call on the first worker. */
   one<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T> {
     if (!this.clients.length) this.clients.push(new SolverClient());
-    return this.clients[0].call<T>(fn, args, progress);
+    return this.clients[0].call<T>(fn, args, progress, undefined, this.traceOf(0));
   }
 
   all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T[]> {
@@ -88,7 +112,7 @@ export class SolverPool {
       last[k] = p;
       progress?.(...p.map((_, i) => last.reduce((s, q) => s + (q[i] ?? 0), 0)));
     };
-    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p), decided)));
+    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p), decided, this.traceOf(k))));
   }
 
   cancel() {

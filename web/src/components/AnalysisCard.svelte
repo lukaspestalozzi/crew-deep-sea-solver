@@ -4,6 +4,8 @@
   import type { Snippet } from 'svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { mission, type Job } from '../lib/mission.svelte';
+  import { inspector } from '../lib/inspector.svelte';
+  import WorkList from './WorkList.svelte';
 
   let {
     title,
@@ -34,4 +36,5 @@
     {/if}
   {/if}
   {#if show}{@render children?.()}{/if}
+  {#if inspector.on}<WorkList job={job.name} />{/if}
 </section>

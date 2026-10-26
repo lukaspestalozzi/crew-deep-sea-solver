@@ -107,6 +107,8 @@ pub struct Options<'a> {
     /// relative rank at each trick. Cheaper per position, but positions that
     /// differ only in which interchangeable cards are gone no longer share a key.
     pub zobrist: bool,
+    /// Report searches as [`crate::trace::Event`]s.
+    pub trace: Option<crate::trace::Trace<'a>>,
 }
 
 impl Default for Options<'_> {
@@ -122,11 +124,20 @@ impl Default for Options<'_> {
             cache_limit: 4_000_000,
             node_limit: None,
             zobrist: false,
+            trace: None,
         }
     }
 }
 
-impl Options<'_> {
+impl<'a> Options<'a> {
+    /// The same options; the next traced search is labelled `label`.
+    pub fn labelled<'b>(&self, label: &'b str) -> Options<'b>
+    where
+        'a: 'b,
+    {
+        Options { trace: self.trace.map(|t| t.labelled(label)), ..self.clone() }
+    }
+
     /// No cache, no merging, no joint count check, deck order, plain
     /// depth-first: the reference search.
     pub fn plain() -> Self {
@@ -173,7 +184,29 @@ pub fn solve(s: &Situation, opts: &Options) -> Result<(Verdict, Stats), SolveErr
     if let Some(id) = redeal(s) {
         return Ok((Verdict::Redeal(id), Stats::default()));
     }
-    Ok(solve_game(g, &tasks, opts))
+    let (v, _, stats) = traced(s, opts, |o| run(g, Model::fixed(&tasks), o));
+    Ok((v, stats))
+}
+
+/// Short name of a verdict, as in trace events.
+pub fn verdict_name(v: &Verdict) -> &'static str {
+    match v {
+        Verdict::Feasible(_) => "feasible",
+        Verdict::Infeasible => "infeasible",
+        Verdict::Redeal(_) => "redeal",
+        Verdict::Undecided => "undecided",
+        Verdict::Cancelled => "cancelled",
+    }
+}
+
+/// Run a search on `s`, reported as one unit if the options trace.
+fn traced<T>(s: &Situation, opts: &Options, f: impl FnOnce(&Options) -> (Verdict, T, Stats)) -> (Verdict, T, Stats) {
+    let Some(t) = opts.trace else { return f(opts) };
+    let id = t.start(t.label, s);
+    let inner = Options { trace: Some(crate::trace::Trace { current: Some(id), ..t }), ..opts.clone() };
+    let r = f(&inner);
+    t.end(id, verdict_name(&r.0), Some(&r.2));
+    r
 }
 
 pub fn solve_game(g: Game, tasks: &Resolved, opts: &Options) -> (Verdict, Stats) {
@@ -194,7 +227,7 @@ pub fn solve_drafts(s: &Situation, opts: &Options) -> Result<(Verdict, Option<Ve
         return Ok((Verdict::Redeal(id), None, Stats::default()));
     }
     let model = Model::drafts(s, &g);
-    Ok(run(g, model, opts))
+    Ok(traced(s, opts, |o| run(g, model, o)))
 }
 
 /// Combined status of all tasks (between tricks), owners fixed.
@@ -261,6 +294,30 @@ pub fn decide_drafts(
     progress: Option<&dyn Fn(usize, usize)>,
     decided: Option<&dyn Fn(usize, &Decision)>,
 ) -> Result<DraftDecisions, SolveError> {
+    let Some(t) = opts.trace else { return decide_drafts_in(s, drafts, opts, progress, decided) };
+    // One unit, with each search inside it.
+    let unit = t.start(t.label, s);
+    let inner = Options { trace: Some(t.child(unit, "search")), ..opts.clone() };
+    let r = decide_drafts_in(s, drafts, &inner, progress, decided);
+    let summary = match &r {
+        Ok(d) => {
+            let works = d.iter().filter(|x| matches!(x, Decision::Works(_))).count();
+            let open = d.iter().filter(|x| **x == Decision::Open).count();
+            format!("{works} of {} work, {open} open", d.len())
+        }
+        Err(e) => format!("error: {e}"),
+    };
+    t.end(unit, &summary, None);
+    r
+}
+
+fn decide_drafts_in(
+    s: &Situation,
+    drafts: &[Vec<Owner>],
+    opts: &Options,
+    progress: Option<&dyn Fn(usize, usize)>,
+    decided: Option<&dyn Fn(usize, &Decision)>,
+) -> Result<DraftDecisions, SolveError> {
     let g = s.game().map_err(|e| SolveError::Replay(e.to_string()))?;
     if redeal(s).is_some() {
         return Ok(vec![Decision::Fails; drafts.len()]);
@@ -309,7 +366,9 @@ pub fn decide_drafts(
                 found += 1;
                 continue;
             }
-            match solve(&with_owners(&drafts[i]), &Options { node_limit: Some(budget), ..opts.clone() })?.0 {
+            let label = format!("draft {}/{} · budget {}", i + 1, drafts.len(), budget);
+            let o = Options { node_limit: Some(budget), trace: opts.trace.map(|t| t.labelled(&label)), ..opts.clone() };
+            match solve(&with_owners(&drafts[i]), &o)?.0 {
                 Verdict::Feasible(line) => {
                     settle(&mut out, i, Decision::Works(line.clone()));
                     found += 1;
@@ -330,7 +389,9 @@ pub fn decide_drafts(
         // All open drafts together.
         let mut model = Model::drafts(s, &g);
         model.allowed = Some(open.iter().map(|&i| as_index(&drafts[i])).collect());
-        match run(g.clone(), model, &Options { node_limit: Some(budget), ..opts.clone() }).0 {
+        let label = format!("all {} open drafts together · budget {}", open.len(), budget);
+        let o = Options { node_limit: Some(budget), trace: opts.trace.map(|t| t.labelled(&label)), ..opts.clone() };
+        match traced(s, &o, |o| run(g.clone(), model, o)).0 {
             Verdict::Infeasible => {
                 for &i in &open {
                     settle(&mut out, i, Decision::Fails);
@@ -672,6 +733,9 @@ struct Search<'o, 'a> {
     decider: &'o dyn MoveDecider,
     /// Node count at which the current restart stops.
     round_limit: Option<u64>,
+    /// Restart number and its node budget (portfolio), for trace events.
+    restart: u32,
+    budget: u64,
     /// Reused buffers of the combined check.
     pairs_buf: Vec<(u128, Option<CountRule>, (u8, u8))>,
     settled_buf: Vec<(usize, Req)>,
@@ -700,6 +764,8 @@ impl<'o, 'a> Search<'o, 'a> {
             zob: hands_zobrist(g),
             decider: opts.decider,
             round_limit: None,
+            restart: 0,
+            budget: 0,
             pairs_buf: Vec::new(),
             settled_buf: Vec::new(),
         }
@@ -1002,6 +1068,20 @@ impl Search<'_, '_> {
         k
     }
 
+    fn trace_progress(&self) {
+        if let Some(t) = self.opts.trace {
+            if let Some(id) = t.current {
+                (t.sink)(&crate::trace::Event::Progress {
+                    id,
+                    nodes: self.stats.nodes,
+                    restart: self.restart,
+                    budget: self.budget,
+                    cache: self.failed.len(),
+                });
+            }
+        }
+    }
+
     /// Count a node; false if the search must stop (cancel or node limit).
     fn tick(&mut self) -> bool {
         self.stats.nodes += 1;
@@ -1021,6 +1101,7 @@ impl Search<'_, '_> {
                 if let Some(p) = self.opts.progress {
                     p(self.stats.nodes);
                 }
+                self.trace_progress();
             }
         }
         true
@@ -1119,6 +1200,9 @@ impl Search<'_, '_> {
             for &d in &deciders {
                 self.decider = d;
                 self.round_limit = Some(self.stats.nodes.saturating_add(budget));
+                self.restart += 1;
+                self.budget = budget;
+                self.trace_progress();
                 self.line.clear();
                 let r = self.dfs(g, alive, 0);
                 if r.is_some() || self.stopped.is_some() {

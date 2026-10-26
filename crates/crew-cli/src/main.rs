@@ -29,7 +29,7 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--dfs] [--best-first] [--deck-order] [--zobrist]
+  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--dfs] [--best-first] [--deck-order] [--zobrist] [--trace OUT]
                                  solve every situation in a .crew file; tasks with
                                  owner ? are searched over all legal drafts at once;
                                  --count-drafts also counts the drafts that work (sampled
@@ -43,7 +43,7 @@ const USAGE: &str = "usage:
   crew bench --load FILE [--timeout SECS] [-v]
                                  the same timing over the situations in FILE; with owner ?
                                  the verdict over all drafts is timed
-                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache)";
+                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache, --trace OUT)";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -97,8 +97,35 @@ fn timed_verdict(s: &Situation, secs: f64, base: &Options) -> ((&'static str, u6
 }
 
 /// Search options from the command line flags.
+/// `--trace FILE`: every search as JSON lines (see crew_core::trace), with
+/// "t" in milliseconds since the start.
+static TRACE: std::sync::OnceLock<std::sync::Mutex<(std::fs::File, Instant)>> = std::sync::OnceLock::new();
+
+fn trace_sink(e: &crew_core::trace::Event) {
+    use std::io::Write;
+    if let Some(m) = TRACE.get() {
+        let mut g = m.lock().unwrap();
+        let json = e.to_json();
+        let ms = g.1.elapsed().as_secs_f64() * 1000.0;
+        let _ = writeln!(g.0, "{},\"t\":{ms:.1}}}", &json[..json.len() - 1]);
+    }
+}
+
+fn cli_trace() -> Option<crew_core::trace::Trace<'static>> {
+    TRACE.get().map(|_| crew_core::trace::Trace::new(&trace_sink))
+}
+
 fn search_options(args: &[String]) -> Options<'static> {
     let mut o = Options::default();
+    if let Some(path) = args.iter().position(|a| a == "--trace").and_then(|i| args.get(i + 1)) {
+        match std::fs::File::create(path) {
+            Ok(f) => {
+                let _ = TRACE.set(std::sync::Mutex::new((f, Instant::now())));
+            }
+            Err(e) => eprintln!("--trace {path}: {e}"),
+        }
+    }
+    o.trace = cli_trace();
     if args.iter().any(|a| a == "--no-cache") {
         o.use_cache = false;
     }
@@ -241,7 +268,7 @@ fn print_relations(s: &Situation, r: &analysis::DraftRelations) {
 
 fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
     let start = Instant::now();
-    let opts = DraftOptions { reference, limit, ..DraftOptions::default() };
+    let opts = DraftOptions { reference, limit, trace: cli_trace(), ..DraftOptions::default() };
     match analysis::draft_search(s, &opts) {
         Err(e) => println!("error: {e}"),
         Ok(r) => {

@@ -5,6 +5,9 @@
   import DraftExplorer from './DraftExplorer.svelte';
   import PairingTable from './PairingTable.svelte';
   import TrickList from './TrickList.svelte';
+  import WorkList from './WorkList.svelte';
+  import SlowLog from './SlowLog.svelte';
+  import { inspector } from '../lib/inspector.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { DEALS, mission } from '../lib/mission.svelte';
   import type { DraftsOut } from '../lib/solver';
@@ -29,9 +32,15 @@
 
 {#if m.situation && (m.verdict === 'feasible' || m.verdict === 'infeasible')}
   {@const s = m.situation}
-  <div class="seg tabs" role="radiogroup" aria-label={i18n.t('analysis')}>
-    <button role="radio" aria-checked={m.tab === 'deal'} onclick={() => (m.tab = 'deal')}>{i18n.t('tabThisDeal')}</button>
-    <button role="radio" aria-checked={m.tab === 'random'} onclick={() => (m.tab = 'random')}>{i18n.t('tabRandom')}</button>
+  <div class="row between">
+    <div class="seg" role="radiogroup" aria-label={i18n.t('analysis')}>
+      <button role="radio" aria-checked={m.tab === 'deal'} onclick={() => (m.tab = 'deal')}>{i18n.t('tabThisDeal')}</button>
+      <button role="radio" aria-checked={m.tab === 'random'} onclick={() => (m.tab = 'random')}>{i18n.t('tabRandom')}</button>
+    </div>
+    <label class="row small">
+      <input type="checkbox" checked={inspector.on} onchange={(e) => inspector.setOn((e.target as HTMLInputElement).checked)} style="accent-color: var(--accent)" />
+      {i18n.t('details')}
+    </label>
   </div>
 
   {#if m.tab === 'deal'}
@@ -146,6 +155,16 @@
       </AnalysisCard>
     {/if}
   {/if}
+
+  {#if inspector.on}
+    {#if inspector.rows.some((r) => r.job === 'verdict')}
+      <section class="panel">
+        <span class="label">{i18n.t('verdictWork')}</span>
+        <WorkList job="verdict" />
+      </section>
+    {/if}
+    <SlowLog />
+  {/if}
 {/if}
 
 <style>
@@ -154,9 +173,6 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
-  }
-  .tabs {
-    align-self: flex-start;
   }
   .figures {
     display: flex;

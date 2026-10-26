@@ -165,6 +165,36 @@ fn named_cards(kind: &Kind) -> Vec<Card> {
     }
 }
 
+thread_local! {
+    /// JS function receiving trace events (JSON strings), if tracing is on.
+    static TRACE: std::cell::RefCell<Option<js_sys::Function>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Turn tracing on (a function getting each [`crew_core::trace::Event`] as
+/// one line of JSON) or off (`null`), for the calls that follow.
+#[wasm_bindgen]
+pub fn set_trace(f: JsValue) {
+    TRACE.with(|t| *t.borrow_mut() = f.dyn_into::<js_sys::Function>().ok());
+}
+
+fn trace_sink(e: &crew_core::trace::Event) {
+    TRACE.with(|t| {
+        if let Some(f) = &*t.borrow() {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&e.to_json()));
+        }
+    });
+}
+
+/// The trace for options, if tracing is on.
+fn trace() -> Option<crew_core::trace::Trace<'static>> {
+    TRACE.with(|t| t.borrow().is_some()).then(|| crew_core::trace::Trace::new(&trace_sink))
+}
+
+/// The same, with the first search labelled.
+fn trace_as(label: &'static str) -> Option<crew_core::trace::Trace<'static>> {
+    trace().map(|t| t.labelled(label))
+}
+
 /// Cache size per worker when `parts` workers run at once: the default split
 /// between them (at least 500 000 positions), so memory stays bounded.
 fn cache_share(parts: u32) -> usize {
@@ -267,7 +297,7 @@ pub fn solve_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
         Ok(s) => s,
         Err(e) => return err(e),
     };
-    let opts = Options { progress, ..Options::default() };
+    let opts = Options { progress, trace: trace_as("verdict · owners as entered"), ..Options::default() };
     match solver::solve(&s, &opts) {
         Err(e) => err(e),
         Ok((v, stats)) => {
@@ -306,7 +336,7 @@ pub fn solve_drafts_impl(text: &str, progress: Option<&dyn Fn(u64)>) -> String {
         Ok(s) => s,
         Err(e) => return err(e),
     };
-    let opts = Options { progress, ..Options::default() };
+    let opts = Options { progress, trace: trace_as("verdict · over all drafts"), ..Options::default() };
     match solver::solve_drafts(&s, &opts) {
         Err(e) => err(e),
         Ok((v, owners, stats)) => {
@@ -412,6 +442,7 @@ pub fn drafts_impl(
         part,
         cache_limit: cache_share(part.1 as u32),
         decided: Some(&note),
+        trace: trace(),
         ..DraftOptions::default()
     };
     match analysis::draft_search(&s, &opts) {
@@ -522,7 +553,7 @@ pub fn pair_conflicts_impl(text: &str, all_drafts: bool, part: (usize, usize), p
     if all_drafts {
         open_all(&mut s);
     }
-    let opts = Options { cache_limit: cache_share(part.1 as u32), ..Options::default() };
+    let opts = Options { cache_limit: cache_share(part.1 as u32), trace: trace(), ..Options::default() };
     match analysis::pair_conflicts(&s, part, &opts, progress) {
         Err(e) => err(e),
         Ok(None) => ok(json!(null)),
@@ -560,7 +591,7 @@ pub fn deal_robustness(text: &str, deals: u32, seed: u32, part: u32, parts: u32,
                 true,
                 seed as u64,
                 (part as usize, parts as usize),
-                &Options { node_limit: Some(2_000_000), cache_limit: cache_share(parts), ..Options::default() },
+                &Options { node_limit: Some(2_000_000), cache_limit: cache_share(parts), trace: trace(), ..Options::default() },
                 Some(&report),
                 Some(&tell),
             ) {
@@ -624,7 +655,7 @@ pub fn deal_pairing_impl(
             .to_string(),
         )
     };
-    let opts = Options { node_limit: Some(1_000_000), cache_limit: cache_share(part.1 as u32), ..Options::default() };
+    let opts = Options { node_limit: Some(1_000_000), cache_limit: cache_share(part.1 as u32), trace: trace(), ..Options::default() };
     match analysis::deal_pairing(&cards, s.players(), deals as usize, seed as u64, part, 2000, &opts, &note, progress) {
         Ok(done) => ok(json!(done)),
         Err(e) => err(e),
