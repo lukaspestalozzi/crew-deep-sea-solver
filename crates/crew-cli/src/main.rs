@@ -17,6 +17,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("solve") => cmd_solve(&args[1..]),
         Some("bench") => cmd_bench(&args[1..]),
+        Some("orders") => cmd_orders(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -43,7 +44,14 @@ const USAGE: &str = "usage:
   crew bench --load FILE [--timeout SECS] [-v]
                                  the same timing over the situations in FILE; with owner ?
                                  the verdict over all drafts is timed
-                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache, --trace OUT)";
+                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache, --trace OUT)
+  crew orders [--players N] [--target SUM] [--count K] [--seed S] [--budget NODES] [--effort NODES] [--threads T]
+                                 compare the move orders: random missions with a random
+                                 draft; at every position with a choice along a winning
+                                 line, how often each order's first choice wins and the
+                                 mean rank of its first winning move (leads and follows
+                                 apart); and the positions a depth-first search needs with
+                                 each order (at most --effort per mission)";
 
 fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
     match args.iter().position(|a| a == name) {
@@ -135,6 +143,9 @@ fn search_options(args: &[String]) -> Options<'static> {
     if args.iter().any(|a| a == "--task-aware") {
         o.decider = &crew_core::decider::TASK_AWARE;
     }
+    if args.iter().any(|a| a == "--lookahead-all") {
+        o.decider = &crew_core::decider::LOOKAHEAD_ALL;
+    }
     if args.iter().any(|a| a == "--zobrist") {
         o.zobrist = true;
     }
@@ -145,6 +156,140 @@ fn search_options(args: &[String]) -> Options<'static> {
         o.strategy = solver::Strategy::BestFirst { max_positions: 2_000_000 };
     }
     o
+}
+
+/// A random mission: deal, task cards drawn to `target`, a random legal draft.
+fn random_mission(players: usize, target: u32, rng: &mut crew_core::rng::Rng, title: String) -> Result<Situation, String> {
+    use crew_core::catalogue::catalogue;
+    use crew_core::draft;
+    use crew_core::game::Game;
+    use crew_core::situation::Assignment;
+    let hands = Game::random_hands(players, rng);
+    let captain = Game::new(&hands).unwrap().captain as usize;
+    let cards = draft::draw_tasks(catalogue(), players, target, rng).ok_or("could not draw tasks")?;
+    let mut tasks: Vec<Assignment> = cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect();
+    let owners = draft::random_draft(&tasks, players, captain, rng).ok_or("no legal draft")?;
+    for (a, o) in tasks.iter_mut().zip(owners) {
+        a.owner = o;
+    }
+    Ok(Situation { title: Some(title), target: Some(target), hands, tasks, ..Situation::default() })
+}
+
+/// What one mission gives the move-order comparison.
+#[derive(Default)]
+struct OrderRows {
+    /// Per position with a choice and a decided winning move: (lead?, some
+    /// move loses?, first winning rank per order).
+    ranks: Vec<(bool, bool, Vec<Option<usize>>)>,
+    /// Positions a depth-first search needed per order; `None`: over the limit.
+    effort: Vec<Option<u64>>,
+    feasible: Option<bool>,
+}
+
+fn order_rows(s: &Situation, budget: u64, effort: u64) -> OrderRows {
+    use crew_core::position::{self, ORDERS};
+    let mut out = OrderRows::default();
+    for (_, d) in ORDERS {
+        let o = Options { decider: d, strategy: solver::Strategy::Dfs, node_limit: Some(effort), ..Options::default() };
+        out.effort.push(match solver::solve(s, &o) {
+            Ok((Verdict::Feasible(_) | Verdict::Infeasible, st)) => Some(st.nodes),
+            _ => None,
+        });
+    }
+    let Ok((v, _)) = solver::solve(s, &Options { node_limit: Some(effort.saturating_mul(4)), ..Options::default() }) else { return out };
+    out.feasible = match v {
+        Verdict::Feasible(_) => Some(true),
+        Verdict::Infeasible => Some(false),
+        _ => None,
+    };
+    let Verdict::Feasible(line) = v else { return out };
+    let opts = Options { node_limit: Some(budget), ..Options::default() };
+    let mut cur = s.clone();
+    for c in line {
+        let Ok(g) = cur.game() else { break };
+        if g.legal_moves().len() > 1 {
+            if let Ok(Some(st)) = position::position_stats(&cur, &opts) {
+                if !st.winning.is_empty() {
+                    let critical = st.winning.len() + st.open < st.legal;
+                    out.ranks.push((g.current.is_empty(), critical, st.first_win));
+                }
+            }
+        }
+        match position::after(&cur, c) {
+            Ok(n) => cur = n,
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+fn cmd_orders(args: &[String]) -> Result<(), String> {
+    use crew_core::position::ORDERS;
+    use crew_core::rng::Rng;
+    let players: usize = flag(args, "--players", 4)?;
+    let target: u32 = flag(args, "--target", 7)?;
+    let count: usize = flag(args, "--count", 20)?;
+    let seed: u64 = flag(args, "--seed", 1)?;
+    let budget: u64 = flag(args, "--budget", 2_000_000)?;
+    let effort: u64 = flag(args, "--effort", 5_000_000)?;
+    let threads: usize = flag(args, "--threads", std::thread::available_parallelism().map_or(1, |n| n.get()))?;
+    let mut rng = Rng::new(seed);
+    let missions: Vec<Situation> =
+        (0..count).map(|i| random_mission(players, target, &mut rng, format!("orders seed {seed} #{}", i + 1))).collect::<Result<_, _>>()?;
+    let start = Instant::now();
+    let rows: Vec<OrderRows> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads.max(1))
+            .map(|t| {
+                let missions = &missions;
+                sc.spawn(move || missions.iter().enumerate().filter(|(i, _)| i % threads.max(1) == t).map(|(i, s)| (i, order_rows(s, budget, effort))).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut all: Vec<(usize, OrderRows)> = hs.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        all.sort_by_key(|x| x.0);
+        all.into_iter().map(|x| x.1).collect()
+    });
+    let feasible = rows.iter().filter(|r| r.feasible == Some(true)).count();
+    let infeasible = rows.iter().filter(|r| r.feasible == Some(false)).count();
+    println!(
+        "{players} players, target {target}, {count} missions (seed {seed}): {feasible} feasible, {infeasible} infeasible, {} undecided; {:.1} s",
+        count - feasible - infeasible,
+        start.elapsed().as_secs_f64()
+    );
+    let groups = [
+        ("all positions", None, false),
+        ("critical (some move loses)", None, true),
+        ("critical leads", Some(true), true),
+        ("critical follows", Some(false), true),
+    ];
+    for (name, lead, critical) in groups {
+        let pos: Vec<&Vec<Option<usize>>> = rows
+            .iter()
+            .flat_map(|r| r.ranks.iter())
+            .filter(|(l, c, _)| lead.is_none_or(|x| x == *l) && (!critical || *c))
+            .map(|(_, _, r)| r)
+            .collect();
+        println!("{name}: {} positions with a choice", pos.len());
+        for (k, (oname, _)) in ORDERS.iter().enumerate() {
+            let known: Vec<usize> = pos.iter().filter_map(|r| r[k]).collect();
+            let top = known.iter().filter(|&&r| r == 1).count();
+            let mean = known.iter().sum::<usize>() as f64 / known.len().max(1) as f64;
+            println!(
+                "  {oname:<11} first choice wins {:>5.1}%   mean first winning rank {mean:.2}   ({} counted)",
+                100.0 * top as f64 / known.len().max(1) as f64,
+                known.len()
+            );
+        }
+    }
+    println!("depth-first search, positions per mission (limit {effort}):");
+    for (k, (oname, _)) in ORDERS.iter().enumerate() {
+        let mut done: Vec<u64> = rows.iter().filter_map(|r| r.effort[k]).collect();
+        done.sort();
+        let over = rows.len() - done.len();
+        let median = done.get(done.len() / 2).copied().unwrap_or(0);
+        let total: u64 = rows.iter().map(|r| r.effort[k].unwrap_or(effort)).sum();
+        println!("  {oname:<11} total {total:>12}   median {median:>9}   over the limit {over}");
+    }
+    Ok(())
 }
 
 fn cmd_bench(args: &[String]) -> Result<(), String> {

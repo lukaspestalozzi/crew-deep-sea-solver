@@ -43,6 +43,7 @@ All decisions below were taken by Q during the design phase on 2026-10-23 and 20
 | D23 | Result and Analysis screens | Result shows the verdict, why it fails and a winning line, plus a button to Analysis; Analysis has two tabs: "This deal" (drafts / other drafts with explorer and pair check, critical decisions) and "Random deals" (printed sum, "Test 100 deals", tasks together on random deals); each analysis is a card with what it answers, Compute, progress and Cancel; results kept across tabs and screens until the mission changes; the "also check all other drafts" switch is gone (its card is in "This deal"). Tasks together on random deals: this mission's task cards (rule cards left out, as in "Test 100 deals"), progressive, exact per deal within 1M positions per draft, undecided drafts left out and counted | Q found the result cluttered and asked for this question; options chosen by Q (2026-10-26) |
 | D24 | Inspector | Solver trace events (start with the situation, progress, end with statistics), nested units (deal › draft count › search), times added by the receiver; a "Details" switch on Analysis shows each card's work list (every search; capped at 400 rows, slow ones kept), export of the exact situation, open in desk; slow-case log in IndexedDB (threshold default 2 min, adjustable), export all for `crew bench --load`; `crew --trace OUT` writes the same events as JSON lines; designed so a bot adds decision events to the same stream; next step: position inspector (solved moves, move-order ranks) | Asked by Q for hard situations, options chosen by Q (2026-10-26) |
 | D25 | Position Inspector and move-order play | A position = situation with owners fixed and cards played (also mid-trick), so `crew 1` text; per position: every legal move solved (budget 2M per move, then Continue without a limit), move-order ranks and first winning rank; play / back / follow a line; a move order plays every seat with the solver checking after each move, reporting the first losing move and the moves that would have kept the tasks possible; decision events in the trace; benchmark (first choice wins, mean first winning rank) along the winning line and over slow cases; entry points: Result replay, Analysis lines, Inspector rows and slow cases, desk tab. Next: hidden information (a player's view, sampled deals) | Scope and options chosen by Q (2026-10-27) |
+| D26 | Move orders measured; solver unchanged | `crew orders` compares the move orders over many positions. Lookahead stays the solver's default: on critical positions its first choice wins most often in every set. Lookahead for every card ("lookahead all") chooses better follows but does not make the search faster, so it is a fourth move order for the Inspector and the bot only. A single-task check at trick boundaries was tried and dropped (slower) | Measured 2026-10-27, see below |
 
 The interview decisions (Q1–Q12 and follow-ups) are in the resolved questions table at the end, with options and reasoning.
 
@@ -340,3 +341,27 @@ difficulty 10/12, 30 s limit): still open 11 → 5, total 433 s → 245 s.
 Benchmark set with owners `?`: 21.7 s → 0.9 s, none at the limit. Q's
 example: verdict in 90 positions; the exact draft count reaches 55 working
 drafts with 42 open after 10 minutes (before: 45 / 52) and is not finished.
+
+Move orders, 2026-10-27 (`crew orders`, 40 random missions per set, seed 5;
+first choice wins on critical positions, where some move loses):
+
+| Set | Deck order | Task-aware | Lookahead | Lookahead all |
+|---|---|---|---|---|
+| 3 players, difficulty 7 | 66.5% | 65.6% | 75.9% | 75.9% |
+| 4 players, difficulty 7 | 57.1% | 67.5% | 72.8% | – |
+| 4 players, difficulty 11 | 47.1% | 59.1% | 64.9% | 69.9% |
+| 5 players, difficulty 9 | 52.7% | 60.4% | 63.4% | 65.3% |
+
+Critical follows are the weak spot: lookahead equals task-aware there
+(61–78%); lookahead all raises the 4-player set from 61.4% to 69.1%. In the
+full solver (180 hard missions, 10 s each) lookahead all is not faster:
+129.8 s → 135.2 s, open 10 → 11.
+
+Hard cases (the 10 missions still open after 10 s, 60 s each): cuts come
+late (after trick 6–10 with 3 players, 4–7 with 4–5), mostly from one or two
+card-winning or colour-count tasks. A larger cache changes nothing (it never
+fills). From random positions after two tricks a single task is often lost
+on its own and cheap to check, but in the positions the search actually
+visits it rarely is: checking each task alone at trick boundaries cut 1–6%
+of branches while the search got through 3–30× fewer positions in the same time; limited to the
+first three tricks it still cost 13% on the 180 missions. Dropped.

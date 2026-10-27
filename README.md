@@ -35,6 +35,7 @@ cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
 - `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
+- `crew orders [--players N] [--target SUM] [--count K] [--seed S]`: compare the move orders on random missions (random draft): at every position with a choice along a winning line, how often each order's first choice wins and the mean rank of its first winning move, for all positions and for critical ones (some move loses), leads and follows apart; plus the positions a depth-first search needs with each order.
 - `--trace OUT`: write every search as JSON lines (start with the situation, progress about every million positions and at each restart, end with verdict and statistics; `t` in ms), the format of the web app's Details view.
 - `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once. Then prints who takes what: owners every working draft has ("must") or none has ("never"), task pairs always or never with the same player, and the strongest tendencies, each compared with all drafts so that what the draft rules force is left out.
 - `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.

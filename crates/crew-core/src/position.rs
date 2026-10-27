@@ -12,7 +12,12 @@ use crate::task::Status;
 use std::sync::atomic::Ordering;
 
 /// The move orders compared (name, decider), in this order everywhere.
-pub const ORDERS: [(&str, &dyn MoveDecider); 3] = [("deck order", &DECK_ORDER), ("task-aware", &TASK_AWARE), ("lookahead", &LOOKAHEAD)];
+pub const ORDERS: [(&str, &dyn MoveDecider); 4] = [
+    ("deck order", &DECK_ORDER),
+    ("task-aware", &TASK_AWARE),
+    ("lookahead", &LOOKAHEAD),
+    ("lookahead all", &crate::decider::LOOKAHEAD_ALL),
+];
 
 /// The situation after the player to move plays `card`.
 pub fn after(s: &Situation, card: Card) -> Result<Situation, SolveError> {

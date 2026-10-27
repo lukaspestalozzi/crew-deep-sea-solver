@@ -286,28 +286,37 @@ pub static TASK_AWARE: TaskAware = TaskAware { salt: 0 };
 /// later player answers by simple rules (cheapest winning card if it wants
 /// the trick, highest losing card if it must lose it, otherwise feed the
 /// winner a card it needs or play low), and the resulting trick is scored by
-/// who wins it and which needed or forbidden cards it takes. Follows use the
-/// task-aware order.
-pub struct Lookahead;
+/// who wins it and which needed or forbidden cards it takes. With `follows`,
+/// follows are ranked the same way (the rest of the trick played out);
+/// otherwise they use the task-aware order.
+pub struct Lookahead {
+    pub follows: bool,
+}
 
-pub static LOOKAHEAD: Lookahead = Lookahead;
+pub static LOOKAHEAD: Lookahead = Lookahead { follows: false };
+/// Lookahead for follows as well: better first choices on critical follows
+/// (crew orders), but not a faster search, so not the solver's default.
+pub static LOOKAHEAD_ALL: Lookahead = Lookahead { follows: true };
 
 impl MoveDecider for Lookahead {
     fn order(&self, pos: &Position, moves: &mut [Card]) {
         let g = pos.game;
         TASK_AWARE.order(pos, moves);
-        if !g.current.is_empty() || moves.len() < 2 {
+        if (!self.follows && !g.current.is_empty()) || moves.len() < 2 {
             return;
         }
-        let me = g.to_play();
+        let leader = g.leader as usize;
+        let start = g.current.len();
         let wishes: Vec<(CardSet, CardSet)> = (0..g.n).map(|p| card_wishes(pos, p)).collect();
         let desires: Vec<i32> = (0..g.n).map(|p| desire(pos, p)).collect();
         let mut scored: [(i32, usize, Card); 14] = [(0, 0, Card::from_index(0)); 14];
         for (i, &m) in moves.iter().enumerate() {
             let mut cards = [m; 6];
-            let led = m.suit();
-            for k in 1..g.n {
-                let q = (me + k) % g.n;
+            cards[..start].copy_from_slice(&g.current);
+            cards[start] = m;
+            let led = cards[0].suit();
+            for k in start + 1..g.n {
+                let q = (leader + k) % g.n;
                 let best = winning_position(&cards[..k]);
                 let best_card = cards[best];
                 let follow = g.hands[q].intersect(led.cards());
@@ -320,7 +329,7 @@ impl MoveDecider for Lookahead {
                     }
                 };
                 let rank = |y: Card| y.value() as i32 + if y.is_sub() { 10 } else { 0 };
-                let winner_now = (me + best) % g.n;
+                let winner_now = (leader + best) % g.n;
                 let pick = if desires[q] > 0 && playable.iter().any(beats) {
                     playable.iter().filter(|&y| beats(y)).min_by_key(|&y| rank(y))
                 } else if desires[q] < 0 && playable.iter().any(|y| !beats(y)) {
@@ -336,7 +345,7 @@ impl MoveDecider for Lookahead {
                 };
                 cards[k] = pick.unwrap_or(m);
             }
-            let w = (me + winning_position(&cards[..g.n])) % g.n;
+            let w = (leader + winning_position(&cards[..g.n])) % g.n;
             let mut score = 0;
             for &c in &cards[..g.n] {
                 if wishes[w].0.contains(c) {

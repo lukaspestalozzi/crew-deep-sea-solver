@@ -937,7 +937,7 @@ Player2: win B4
         let fixed = TEXT.replace("?: first-trick", "Player1: first-trick");
         let p: Value = serde_json::from_str(&position(&fixed)).unwrap();
         assert_eq!(p["ok"]["to_play"], 0);
-        assert_eq!(p["ok"]["rankings"].as_array().unwrap().len(), 3);
+        assert_eq!(p["ok"]["rankings"].as_array().unwrap().len(), position::ORDERS.len());
         assert_eq!(p["ok"]["status"][0], "open");
         let r: Value = serde_json::from_str(&play_out_impl(&fixed, 2, 0.0, None)).unwrap();
         assert_eq!(r["ok"]["winnable"], true);
@@ -948,7 +948,7 @@ Player2: win B4
         assert_eq!(st["ok"], true);
         let got = got.into_inner();
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0]["first_win"].as_array().unwrap().len(), 3);
+        assert_eq!(got[0]["first_win"].as_array().unwrap().len(), position::ORDERS.len());
     }
 
     #[test]
