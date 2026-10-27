@@ -6,6 +6,7 @@
   import { count, duration, inspector, type WorkRow } from '../lib/inspector.svelte';
   import { router, session } from '../lib/state.svelte';
   import { parse } from '../lib/wasm';
+  import { inspect, inspectable } from '../lib/position.svelte';
 
   let { job }: { job: string } = $props();
 
@@ -49,6 +50,7 @@
         <span class="acts">
           <button class="btn small" onclick={() => (exporting = { text: r.text, title: inspector.path(r) || r.label })}>{i18n.t('export')}</button>
           <button class="btn small" onclick={() => openInDesk(r.text)}>{i18n.t('openInDesk')}</button>
+          {#if inspectable(r.text)}<button class="btn small" onclick={() => inspect(r.text)}>{i18n.t('inspect')}</button>{/if}
         </span>
       </div>
     {/each}

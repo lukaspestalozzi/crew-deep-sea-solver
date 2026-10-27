@@ -9,6 +9,7 @@ use crew_core::analysis::{self, DraftOptions, NoReturn};
 use crew_core::card::Card;
 use crew_core::catalogue::catalogue;
 use crew_core::notation;
+use crew_core::position;
 use crew_core::situation::{Assignment, Owner, PlayedTrick, Situation};
 use crew_core::solver::{self, Decision, Options, Verdict};
 use crew_core::task::{Kind, TrickProp};
@@ -662,6 +663,175 @@ pub fn deal_pairing_impl(
     }
 }
 
+// ---------------------------------------------------------------- positions
+
+fn cards_json(cards: &[Card]) -> Value {
+    json!(cards.iter().map(|c| c.to_string()).collect::<Vec<_>>())
+}
+
+fn status_str(s: crew_core::task::Status) -> &'static str {
+    match s {
+        crew_core::task::Status::Open => "open",
+        crew_core::task::Status::Done => "done",
+        crew_core::task::Status::Failed => "failed",
+    }
+}
+
+/// Options for the position tools: `budget` nodes per search (0: none).
+fn position_opts(budget: f64, parts: u32) -> Options<'static> {
+    Options {
+        node_limit: (budget > 0.0).then_some(budget as u64),
+        cache_limit: cache_share(parts),
+        trace: trace(),
+        ..Options::default()
+    }
+}
+
+/// The position: who is to play, the hands, the trick in progress, the task
+/// status (at the last trick boundary) and the legal moves as each move order
+/// ranks them. Owners must be fixed.
+#[wasm_bindgen]
+pub fn position(text: &str) -> String {
+    let s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    let (g, tasks) = match solver::prepare(&s) {
+        Ok(x) => x,
+        Err(e) => return err(e),
+    };
+    ok(json!({
+        "to_play": g.to_play(),
+        "trick": g.tricks.len() + 1,
+        "in_trick": g.current.len(),
+        "leader": g.leader,
+        "current": cards_json(&g.current),
+        "over": g.is_over(),
+        "hands": (0..g.n).map(|p| cards_json(&g.hands[p].iter().collect::<Vec<_>>())).collect::<Vec<_>>(),
+        "tricks_won": g.trick_counts[..g.n].to_vec(),
+        "legal": cards_json(&g.legal_moves().iter().collect::<Vec<_>>()),
+        "orders": position::ORDERS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        "rankings": position::rankings(&g, &tasks).iter().map(|r| cards_json(r)).collect::<Vec<_>>(),
+        "status": position::task_status(&g, &tasks).into_iter().map(status_str).collect::<Vec<_>>(),
+    }))
+}
+
+/// Solve the legal moves in `only` (space-separated cards; empty: all),
+/// every n-th from `part`; `on_move` gets each as JSON {card, verdict,
+/// nodes, line, tricks} (line and tricks from the position, the move first,
+/// for winning moves).
+#[wasm_bindgen]
+pub fn solve_moves(text: &str, only: &str, budget: f64, part: u32, parts: u32, on_move: JsValue) -> String {
+    let cb = progress_fn(&on_move);
+    let s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    let g = match s.game() {
+        Ok(g) => g,
+        Err(e) => return err(e),
+    };
+    let opts = position_opts(budget, parts);
+    let wanted: Vec<&str> = only.split_whitespace().collect();
+    let moves = g.legal_moves().iter().filter(|m| wanted.is_empty() || wanted.contains(&m.to_string().as_str()));
+    for (i, m) in moves.enumerate() {
+        if i % parts.max(1) as usize != part as usize {
+            continue;
+        }
+        let (v, nodes) = match position::solve_move(&s, m, &opts) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        let mut out = json!({ "card": m.to_string(), "verdict": solver::verdict_name(&v), "nodes": nodes });
+        if let Verdict::Feasible(rest) = &v {
+            let line: Vec<Card> = std::iter::once(m).chain(rest.iter().copied()).collect();
+            out["line"] = cards_json(&line);
+            out["tricks"] = line_tricks(&s, &line);
+        }
+        if let Some(f) = &cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&out.to_string()));
+        }
+    }
+    ok(json!(true))
+}
+
+/// Let move order `order` play on from the position; `on_move` gets
+/// {i, card, still} per move. Returns {line, tricks, winnable, lost_at,
+/// alternatives, undecided, status}.
+#[wasm_bindgen]
+pub fn play_out(text: &str, order: u32, budget: f64, on_move: JsValue) -> String {
+    let cb = progress_fn(&on_move);
+    let send = |x: String| {
+        if let Some(f) = &cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&x));
+        }
+    };
+    play_out_impl(text, order, budget, Some(&send))
+}
+
+pub fn play_out_impl(text: &str, order: u32, budget: f64, send: Option<&dyn Fn(String)>) -> String {
+    let tell = |i: usize, c: Card, still: Option<bool>| {
+        if let Some(f) = send {
+            f(json!({ "i": i, "card": c.to_string(), "still": still }).to_string());
+        }
+    };
+    let s = match situation(text) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    match position::play_out(&s, order as usize, &position_opts(budget, 1), Some(&tell)) {
+        Err(e) => err(e),
+        Ok(None) => ok(Value::Null),
+        Ok(Some(p)) => ok(json!({
+            "line": cards_json(&p.line),
+            "tricks": line_tricks(&s, &p.line),
+            "winnable": p.winnable,
+            "lost_at": p.lost_at,
+            "alternatives": cards_json(&p.alternatives),
+            "undecided": p.undecided,
+            "status": p.status.into_iter().map(status_str).collect::<Vec<_>>(),
+        })),
+    }
+}
+
+/// For each position in `text` (several situations separated by `---`, every
+/// n-th from `part`): `on_position` gets {index, legal, winning, open,
+/// first_win: [rank or null per move order]}.
+#[wasm_bindgen]
+pub fn position_stats(text: &str, budget: f64, part: u32, parts: u32, on_position: JsValue) -> String {
+    let cb = progress_fn(&on_position);
+    let send = |x: String| {
+        if let Some(f) = &cb {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&x));
+        }
+    };
+    position_stats_impl(text, budget, part, parts, Some(&send))
+}
+
+pub fn position_stats_impl(text: &str, budget: f64, part: u32, parts: u32, send: Option<&dyn Fn(String)>) -> String {
+    let list = match notation::parse_all(text) {
+        Ok(l) => l,
+        Err(e) => return err(e),
+    };
+    let opts = position_opts(budget, parts);
+    for (i, s) in list.iter().enumerate() {
+        if i % parts.max(1) as usize != part as usize {
+            continue;
+        }
+        match position::position_stats(s, &opts) {
+            Err(e) => return err(e),
+            Ok(None) => return ok(json!(false)),
+            Ok(Some(st)) => {
+                if let Some(f) = send {
+                    let v = json!({ "index": i, "legal": st.legal, "winning": cards_json(&st.winning), "open": st.open, "first_win": st.first_win });
+                    f(v.to_string());
+                }
+            }
+        }
+    }
+    ok(json!(true))
+}
+
 /// A random deal with task cards drawn to the difficulty `target` (owners `?`), as text.
 #[wasm_bindgen]
 pub fn random_situation(players: u32, target: u32, seed: u32) -> String {
@@ -760,6 +930,25 @@ Player2: win B4
         assert_eq!(got.len(), 3);
         assert_eq!(got[0]["same"][0][0], 0);
         assert_eq!(got[0]["same"][0][1], 1);
+    }
+
+    #[test]
+    fn position_tools_return_json() {
+        let fixed = TEXT.replace("?: first-trick", "Player1: first-trick");
+        let p: Value = serde_json::from_str(&position(&fixed)).unwrap();
+        assert_eq!(p["ok"]["to_play"], 0);
+        assert_eq!(p["ok"]["rankings"].as_array().unwrap().len(), 3);
+        assert_eq!(p["ok"]["status"][0], "open");
+        let r: Value = serde_json::from_str(&play_out_impl(&fixed, 2, 0.0, None)).unwrap();
+        assert_eq!(r["ok"]["winnable"], true);
+        assert_eq!(r["ok"]["line"].as_array().unwrap().len(), 40);
+        let got = std::cell::RefCell::new(Vec::<Value>::new());
+        let collect = |x: String| got.borrow_mut().push(serde_json::from_str(&x).unwrap());
+        let st: Value = serde_json::from_str(&position_stats_impl(&format!("{fixed}---\n{fixed}"), 0.0, 0, 1, Some(&collect))).unwrap();
+        assert_eq!(st["ok"], true);
+        let got = got.into_inner();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0]["first_win"].as_array().unwrap().len(), 3);
     }
 
     #[test]

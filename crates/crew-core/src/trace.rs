@@ -4,6 +4,7 @@
 //! a draft count, which holds searches. Times are added by the receiver
 //! (the core has no clock in WebAssembly).
 
+use crate::card::Card;
 use crate::situation::Situation;
 use crate::solver::Stats;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,11 @@ pub enum Event<'a> {
     /// The unit ends: "feasible", "infeasible", "undecided", "cancelled",
     /// "redeal", or a group's summary. Searches give their statistics.
     End { id: u64, result: &'a str, stats: Option<&'a Stats> },
+    /// A move chosen by a move order (a bot): the position before it, the
+    /// legal moves best first, the move played, and what the solver says
+    /// about the position after it ("feasible", "infeasible", "undecided",
+    /// or "" if not checked).
+    Decision { id: u64, parent: Option<u64>, label: &'a str, situation: &'a Situation, ranked: &'a [Card], chosen: Card, after: &'a str },
 }
 
 pub type Sink<'a> = dyn Fn(&Event) + 'a;
@@ -48,6 +54,11 @@ impl<'a> Trace<'a> {
 
     pub fn end(&self, id: u64, result: &str, stats: Option<&Stats>) {
         (self.sink)(&Event::End { id, result, stats });
+    }
+
+    pub fn decision(&self, label: &str, situation: &Situation, ranked: &[Card], chosen: Card, after: &str) {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        (self.sink)(&Event::Decision { id, parent: self.parent, label, situation, ranked, chosen, after });
     }
 
     /// The same sink for units inside `id`, labelled `label`.
@@ -83,6 +94,14 @@ impl Event<'_> {
                 });
                 format!(r#"{{"ev":"end","id":{id},"result":{},"stats":{stats}}}"#, json_str(result))
             }
+            Event::Decision { id, parent, label, situation, ranked, chosen, after } => format!(
+                r#"{{"ev":"decision","id":{id},"parent":{},"label":{},"text":{},"ranked":[{}],"chosen":"{chosen}","after":{}}}"#,
+                parent.map_or("null".to_string(), |p| p.to_string()),
+                json_str(label),
+                json_str(&crate::notation::write(situation)),
+                ranked.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(","),
+                json_str(after),
+            ),
         }
     }
 }

@@ -947,6 +947,7 @@ tasks:
                 Event::Start { id, parent, label, .. } => ("start", *id, *parent, label.to_string()),
                 Event::Progress { id, .. } => ("progress", *id, None, String::new()),
                 Event::End { id, result, .. } => ("end", *id, None, result.to_string()),
+                Event::Decision { id, .. } => ("decision", *id, None, String::new()),
             })
         };
         let cards = [crate::catalogue::find("win B4").unwrap(), crate::catalogue::find("tricks =2").unwrap()];
@@ -965,6 +966,7 @@ tasks:
                     open.push(*id);
                 }
                 "progress" => assert!(open.contains(id)),
+                "decision" => {}
                 _ => assert_eq!(open.pop(), Some(*id)),
             }
         }

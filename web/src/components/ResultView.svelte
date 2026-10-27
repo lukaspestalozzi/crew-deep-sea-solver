@@ -9,6 +9,7 @@
   import { mission, type Verdict } from '../lib/mission.svelte';
   import type { TrickOut } from '../lib/solver';
   import { textOf } from '../lib/tasks';
+  import { inspect, positionOnLine } from '../lib/position.svelte';
 
   let {
     text,
@@ -118,13 +119,17 @@
     <div class="row between">
       <span class="label">{i18n.t('aWinningLine')}</span>
       {#if step === null}
-        <button class="btn small outline-accent" onclick={() => (step = 1)}>{i18n.t('replay')}</button>
+        <span class="row">
+          <button class="btn small outline-accent" onclick={() => (step = 1)}>{i18n.t('replay')}</button>
+          <button class="btn small" onclick={() => inspect(positionOnLine(m.situation!, shownLine!.owners, shownLine!.tricks, 0))}>{i18n.t('inspect')}</button>
+        </span>
       {:else}
         <span class="row">
           <button class="btn small" disabled={step <= 1} onclick={() => (step = step! - 1)} aria-label="previous">◀</button>
           <span class="small muted">{step}/{shownLine.tricks.length}</span>
           <button class="btn small" disabled={step >= shownLine.tricks.length} onclick={() => (step = step! + 1)} aria-label="next">▶</button>
           <button class="btn small" onclick={() => (step = null)}>{i18n.t('showAll')}</button>
+          <button class="btn small" onclick={() => inspect(positionOnLine(m.situation!, shownLine!.owners, shownLine!.tricks, step!))}>{i18n.t('inspect')}</button>
         </span>
       {/if}
     </div>

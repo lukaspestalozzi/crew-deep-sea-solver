@@ -69,6 +69,27 @@ export interface Check {
 }
 export const check = (text: string): Result<Check> => JSON.parse(w.check(text));
 
+/** A position in play (owners fixed): see `position` in the WASM API. */
+export interface PositionInfo {
+  to_play: number;
+  /** 1-based number of the trick in progress, cards already in it, its leader. */
+  trick: number;
+  in_trick: number;
+  leader: number;
+  current: string[];
+  over: boolean;
+  hands: string[][];
+  tricks_won: number[];
+  legal: string[];
+  /** Names of the move orders, and the legal moves as each ranks them. */
+  orders: string[];
+  rankings: string[][];
+  /** Per task, at the last trick boundary. */
+  status: ('open' | 'done' | 'failed')[];
+}
+
+export const positionInfo = (text: string): Result<PositionInfo> => JSON.parse(w.position(text));
+
 export const randomSituation = (players: number, target: number): Result<string> =>
   JSON.parse(w.random_situation(players, target, Math.floor(Math.random() * 2 ** 31)));
 

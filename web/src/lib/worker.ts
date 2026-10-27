@@ -27,6 +27,15 @@ self.onmessage = async (e: MessageEvent<Call>) => {
       case 'pair_conflicts':
         out = w.pair_conflicts(args[0] as string, args[1] as boolean, args[2] as number, args[3] as number, progress);
         break;
+      case 'solve_moves':
+        out = w.solve_moves(args[0] as string, args[1] as string, args[2] as number, args[3] as number, args[4] as number, decided);
+        break;
+      case 'play_out':
+        out = w.play_out(args[0] as string, args[1] as number, args[2] as number, decided);
+        break;
+      case 'position_stats':
+        out = w.position_stats(args[0] as string, args[1] as number, args[2] as number, args[3] as number, decided);
+        break;
       case 'conflict':
         out = w.conflict(args[0] as string);
         break;

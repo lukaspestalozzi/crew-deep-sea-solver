@@ -8,6 +8,12 @@
   import WorkList from './WorkList.svelte';
   import SlowLog from './SlowLog.svelte';
   import { inspector } from '../lib/inspector.svelte';
+  import { inspect, positionOnLine } from '../lib/position.svelte';
+  import PositionView from './PositionView.svelte';
+
+  /** In the desk view: a third tab with the Position Inspector. */
+  let { desk = false }: { desk?: boolean } = $props();
+  const tab = $derived(!desk && mission.tab === 'position' ? 'deal' : mission.tab);
   import { i18n } from '../lib/i18n.svelte';
   import { DEALS, mission } from '../lib/mission.svelte';
   import type { DraftsOut } from '../lib/solver';
@@ -34,8 +40,11 @@
   {@const s = m.situation}
   <div class="row between">
     <div class="seg" role="radiogroup" aria-label={i18n.t('analysis')}>
-      <button role="radio" aria-checked={m.tab === 'deal'} onclick={() => (m.tab = 'deal')}>{i18n.t('tabThisDeal')}</button>
-      <button role="radio" aria-checked={m.tab === 'random'} onclick={() => (m.tab = 'random')}>{i18n.t('tabRandom')}</button>
+      <button role="radio" aria-checked={tab === 'deal'} onclick={() => (m.tab = 'deal')}>{i18n.t('tabThisDeal')}</button>
+      <button role="radio" aria-checked={tab === 'random'} onclick={() => (m.tab = 'random')}>{i18n.t('tabRandom')}</button>
+      {#if desk}
+        <button role="radio" aria-checked={tab === 'position'} onclick={() => (m.tab = 'position')}>{i18n.t('tabPosition')}</button>
+      {/if}
     </div>
     <label class="row small">
       <input type="checkbox" checked={inspector.on} onchange={(e) => inspector.setOn((e.target as HTMLInputElement).checked)} style="accent-color: var(--accent)" />
@@ -43,7 +52,9 @@
     </label>
   </div>
 
-  {#if m.tab === 'deal'}
+  {#if tab === 'position'}
+    {#if desk}<PositionView />{/if}
+  {:else if tab === 'deal'}
     {#if m.hasOwners}
       <AnalysisCard
         title={m.unknownOwners ? i18n.t('draftsThatWork') : i18n.t('otherDrafts')}
@@ -68,7 +79,10 @@
                 <span class="small">{i18n.owner(t.owner)} → <strong>{i18n.owner(d.closest.owners[i])}</strong> · {textOf(t.id)}</span>
               {/if}
             {/each}
-            <span class="small muted">{i18n.t('lineWithFix')}</span>
+            <span class="row between">
+              <span class="small muted">{i18n.t('lineWithFix')}</span>
+              <button class="btn small" onclick={() => inspect(positionOnLine(s, d.closest!.owners, d.closest!.tricks, 0, true))}>{i18n.t('inspect')}</button>
+            </span>
             <TrickList tricks={d.closest.tricks} players={s.hands.length} />
           {/if}
           {#if draftable < 2}

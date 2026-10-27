@@ -88,7 +88,7 @@ Player1: first-trick
       {#if analysed}
         <ResultView text={analysed} />
         <span class="label" style="margin-top: 12px">{i18n.t('analysis')}</span>
-        <AnalysisView />
+        <AnalysisView desk />
       {/if}
     </section>
   </div>

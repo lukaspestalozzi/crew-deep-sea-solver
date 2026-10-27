@@ -8,6 +8,7 @@ pub mod draft;
 pub mod game;
 pub mod generate;
 pub mod notation;
+pub mod position;
 pub mod rng;
 pub mod situation;
 pub mod trace;

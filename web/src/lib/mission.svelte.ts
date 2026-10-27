@@ -83,7 +83,7 @@ class Mission {
 
   text = $state('');
   /** Tab on the Analysis screen (kept across missions). */
-  tab = $state<'deal' | 'random'>('deal');
+  tab = $state<'deal' | 'random' | 'position'>('deal');
   situation = $state<Situation | null>(null);
   difficulty = $state(0);
   redeal = $state<string | null>(null);

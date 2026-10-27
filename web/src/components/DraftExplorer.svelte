@@ -6,6 +6,7 @@
   import { draftStats, mark, type Count, type Filter } from '../lib/draftStats';
   import { i18n } from '../lib/i18n.svelte';
   import { mission } from '../lib/mission.svelte';
+  import { inspect, positionOnLine } from '../lib/position.svelte';
   import type { DraftRow } from '../lib/solver';
   import { textOf } from '../lib/tasks';
   import type { Situation } from '../lib/wasm';
@@ -126,7 +127,10 @@
     {#each stats.works.slice(0, shown) as r}
       <button class="draft small" class:open={picked === r} onclick={() => (picked = picked === r ? null : r)}>{summary(r)}</button>
       {#if picked === r && r.tricks}
-        <span class="small muted">{i18n.t('lineForDraft')}</span>
+        <span class="row between">
+          <span class="small muted">{i18n.t('lineForDraft')}</span>
+          <button class="btn small" onclick={() => inspect(positionOnLine(situation, r.owners, r.tricks!, 0, !mission.unknownOwners))}>{i18n.t('inspect')}</button>
+        </span>
         <TrickList tricks={r.tricks} players={situation.hands.length} />
       {/if}
     {/each}

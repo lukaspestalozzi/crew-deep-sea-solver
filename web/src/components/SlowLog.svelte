@@ -4,6 +4,7 @@
   import ExportSheet from './ExportSheet.svelte';
   import { i18n } from '../lib/i18n.svelte';
   import { count, duration, inspector } from '../lib/inspector.svelte';
+  import { inspect, inspectable } from '../lib/position.svelte';
 
   let exporting = $state<{ text: string; title: string } | null>(null);
   const all = () => inspector.slow.map((r) => r.text.trimEnd() + '\n').join('---\n');
@@ -35,6 +36,7 @@
         <span class="facts">{r.result ?? i18n.t('running')} · {duration(r.ms)} · {count(r.nodes)} {i18n.t('positionsShort')} · {new Date(r.date).toLocaleString()}</span>
         <span class="row">
           <button class="btn small" onclick={() => (exporting = { text: r.text, title: r.label })}>{i18n.t('export')}</button>
+          {#if inspectable(r.text)}<button class="btn small" onclick={() => inspect(r.text)}>{i18n.t('inspect')}</button>{/if}
           <button class="btn small" onclick={() => inspector.deleteSlow(r.id)}>{i18n.t('delete')}</button>
         </span>
       </div>
