@@ -358,11 +358,13 @@ pub fn pair_conflicts(
 // ---------------------------------------------------------------- conflicts
 
 /// Smallest set of tasks (indices into `s.tasks`) that cannot all be
-/// fulfilled together from the deal, by deletion: each task in the result is
-/// needed for the conflict. Played tricks are ignored, so this explains why
+/// fulfilled together from the deal. Deleting task by task gives a conflict
+/// in which every task is needed; every smaller set of tasks is then tried,
+/// fewest tasks first. Played tricks are ignored, so this explains why
 /// the mission was impossible from the start (use [`point_of_no_return`] for
 /// games that became impossible during play). Requires every owner fixed.
-/// `None` if feasible from the deal, or cancelled. One solve per task.
+/// `None` if feasible from the deal, or cancelled. One solve per task, plus
+/// one per set of tasks smaller than the conflict found by deletion.
 pub fn smallest_conflict(s: &Situation, cancel: Option<&AtomicBool>) -> Result<Option<Vec<usize>>, SolveError> {
     let opts = Options { cancel, ..Options::default() };
     let infeasible = |keep: &[usize]| -> Result<Option<bool>, SolveError> {
@@ -388,6 +390,24 @@ pub fn smallest_conflict(s: &Situation, cancel: Option<&AtomicBool>) -> Result<O
             Some(true) => keep = without,
             Some(false) => i += 1,
             None => return Ok(None),
+        }
+    }
+    // A conflict with fewer tasks may exist among the other tasks.
+    for size in 1..keep.len() {
+        let mut set: Vec<usize> = (0..size).collect();
+        loop {
+            match infeasible(&set)? {
+                Some(true) => return Ok(Some(set)),
+                Some(false) => {}
+                None => return Ok(None),
+            }
+            // Next set of `size` task indices, in lexicographic order.
+            let n = s.tasks.len();
+            let Some(i) = (0..size).rev().find(|&i| set[i] < n - size + i) else { break };
+            set[i] += 1;
+            for j in i + 1..size {
+                set[j] = set[j - 1] + 1;
+            }
         }
     }
     Ok(Some(keep))
@@ -847,6 +867,14 @@ tasks:
         assert_eq!(ids, vec!["first-trick", "first 2"]);
         let ok = situation("Player2: win B4");
         assert_eq!(smallest_conflict(&ok, None).unwrap(), None);
+    }
+
+    #[test]
+    fn smallest_conflict_is_the_one_with_fewest_tasks() {
+        // {0, 1} clash (4 and 5 tricks for one player); so do {1, 2, 3}
+        // (4 + 2 + 6 tricks of 10), which deleting task by task would return.
+        let s = situation("Player1: tricks =5\nPlayer1: tricks =4\nPlayer2: tricks =2\nPlayer3: tricks =6");
+        assert_eq!(smallest_conflict(&s, None).unwrap(), Some(vec![0, 1]));
     }
 
     #[test]
