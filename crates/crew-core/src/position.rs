@@ -111,6 +111,9 @@ pub fn play_out(
     opts: &Options,
     on_move: Option<&dyn Fn(usize, Card, Option<bool>)>,
 ) -> Result<Option<PlayOut>, SolveError> {
+    if order >= ORDERS.len() {
+        return Err(SolveError::Replay(format!("unknown move order {order} (0 to {})", ORDERS.len() - 1)));
+    }
     let cancelled = || opts.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
     let (_, tasks) = solver::prepare(s)?;
     let verdict = |x: &Situation, label: &str| -> Result<Option<bool>, SolveError> {
@@ -289,6 +292,13 @@ mod tests {
         // Deck order gives up B4 in this deal (move 10; B6 would have kept it).
         let d = play_out(&s, 0, &Options::default(), None).unwrap().unwrap();
         assert_eq!((d.lost_at, d.alternatives), (Some(9), vec![Card::parse("B6").unwrap()]));
+    }
+
+    #[test]
+    fn play_out_rejects_an_unknown_move_order() {
+        let s = situation("Player2: win B4");
+        let e = play_out(&s, ORDERS.len(), &Options::default(), None).unwrap_err();
+        assert!(e.to_string().contains("unknown move order"), "{e}");
     }
 
     #[test]

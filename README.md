@@ -34,13 +34,16 @@ cargo run --release -p crew-cli -- solve examples/mock.crew --analyse --all-draf
 cargo run --release -p crew-cli -- bench --players 4 --target 7 --count 20 -v
 ```
 
-- `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once.
-- `crew orders [--players N] [--target SUM] [--count K] [--seed S]`: compare the move orders on random missions (random draft): at every position with a choice along a winning line, how often each order's first choice wins and the mean rank of its first winning move, for all positions and for critical ones (some move loses), leads and follows apart; plus the positions a depth-first search needs with each order.
-- `--trace OUT`: write every search as JSON lines (start with the situation, progress about every million positions and at each restart, end with verdict and statistics; `t` in ms), the format of the web app's Details view.
-- `--count-drafts`: also count the drafts that work, exactly (sampled above `--limit`, default 2000): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once. Then prints who takes what: owners every working draft has ("must") or none has ("never"), task pairs always or never with the same player, and the strongest tendencies, each compared with all drafts so that what the draft rules force is left out.
-- `--all-drafts`: also check every other draft. `--analyse`: critical decisions, smallest conflict, point of no return.
-- `--dfs`, `--best-first`, `--task-aware`, `--deck-order`, `--zobrist`: search strategy, move order and position hashing (see Search).
-- `bench`: random deals with tasks drawn to a difficulty sum and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file.
+- `solve FILE`: every situation in the file. Tasks with owner `?` are searched over all legal drafts at once. Fixed owners that break the standard draft rule (too many tasks for a player, or the captain holds a task he may not take) give a `warning:` line; the situation is solved anyway.
+- `crew orders [--players N] [--target SUM] [--count K] [--seed S] [--budget NODES] [--effort NODES] [--threads T]`: compare the move orders on random missions (random draft): at every position with a choice along a winning line, how often each order's first choice wins and the mean rank of its first winning move, for all positions and for critical ones (some move loses), leads and follows apart; plus the positions a depth-first search needs with each order (at most `--effort` per mission).
+- `--trace OUT` (`solve`, `bench`): write every search as JSON lines (start with the situation, progress about every million positions and at each restart, end with verdict and statistics; `t` in ms), the format of the web app's Details view.
+- `--count-drafts` (`solve`, only for tasks with owner `?`; for fixed owners it is ignored with a note): also count the drafts that work, exactly (sampled above `--limit`, default 2000, at least 1): rounds with doubling node budgets per draft, winning lines replayed against the other drafts, and searches over all open drafts together that can prove them all infeasible at once. Then prints who takes what: owners every working draft has ("must") or none has ("never"), task pairs always or never with the same player, and the strongest tendencies, each compared with all drafts so that what the draft rules force is left out. With a sample, this block is labelled "among the N sampled working drafts" and worded "in all / in none of the sampled working drafts", since it is not proven for every draft.
+- `--all-drafts` (`solve`, only for fixed owners; ignored with a note for `?`): also check every other draft. Whether another draft would have worked is judged from the deal, so played tricks are ignored there (as in the web app). `--analyse` (same): critical decisions, smallest conflict, point of no return.
+- Search flags (`solve`, `bench`): `--dfs`, `--best-first`, `--deck-order`, `--task-aware`, `--lookahead-all`, `--zobrist` choose the search strategy, move order and position hashing (see Search); `--no-cache` turns the lost-position cache off.
+- `bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]`: random deals with tasks drawn to a difficulty sum (at most 25 task cards) and a random legal draft; prints solve times. `bench --load FILE` times the situations in a file. `--players` is 3 to 5, `--timeout` a positive number of seconds.
+- Flags that take a value (`--limit`, `--trace`, `--players`, …) consume it wherever they appear; unknown flags and bad numbers are an error with the usage text, exit code 1.
+
+Exit codes of `solve`: `1` if any situation had an error (or the arguments or the file were wrong); otherwise `2` if any verdict is infeasible or a re-deal; otherwise `3` if any is undecided or cancelled; otherwise `0` (all feasible). Warnings and notes do not change it.
 
 ## Search
 
@@ -102,7 +105,8 @@ trick1 Player1: G6 G4 G2 G3
 - Task owners: `PlayerN`, `?` (unknown, draft search) or `crew` (rule cards only).
 - Tasks: an official ID from `tasks.toml`, or any task of the categories as a parametric ID (below).
 - `played`: leader, then the cards clockwise. The last trick may be incomplete.
-- `#` starts a comment. Several situations in one file are separated by a line `---`.
+- `#` starts a comment, except on the `title:` line, where titles are free text. Several situations in one file are separated by a line `---`. A leading UTF-8 byte order mark is ignored.
+- At most 25 tasks (rule cards included) per situation, and each task card once.
 
 ## Generated tasks
 

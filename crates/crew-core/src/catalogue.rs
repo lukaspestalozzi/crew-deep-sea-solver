@@ -92,11 +92,13 @@ pub fn parse(src: &str) -> Result<Vec<TaskCard>, String> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct File {
     task: Vec<Raw>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Raw {
     id: String,
     category: String,
@@ -115,7 +117,7 @@ struct Raw {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
 enum KindDef {
     WinCards { cards: Vec<String> },
     WinNone { cards: Vec<String> },
@@ -152,7 +154,7 @@ enum KindDef {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
 enum PropDef {
     AllBelow { bound: u8 },
     AllAbove { bound: u8 },
@@ -293,6 +295,16 @@ mod tests {
         ];
         assert_eq!(per.into_iter().collect::<Vec<_>>(), expected.to_vec());
         assert_eq!(cat.iter().filter(|t| !t.is_rule()).count(), 96);
+    }
+
+    #[test]
+    fn unknown_fields_in_the_data_are_rejected() {
+        let ok = "[[task]]\nid = \"x\"\ncategory = \"cards\"\ndifficulty = [1, 1, 1]\ntext_en = \"t\"\nkind = { type = \"win_cards\", cards = [\"P1\"] }\n";
+        assert!(parse(ok).is_ok(), "{:?}", parse(ok).err());
+        let typo = ok.replace("text_en", "doubtfull = true\ntext_en");
+        assert!(parse(&typo).is_err());
+        let kind_typo = ok.replace("cards = [", "card = [");
+        assert!(parse(&kind_typo).is_err());
     }
 
     #[test]
