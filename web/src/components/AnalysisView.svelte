@@ -102,6 +102,7 @@
               <button class="btn small" onclick={() => m.cancel()}>{i18n.t('cancel')}</button>
             </span>
           {:else}
+            {#if m.pairsJob.error}<div class="error">{m.pairsJob.error}</div>{/if}
             <span class="pairs">
               <span class="small muted">{i18n.t('pairsSub')}</span>
               <button class="btn small outline-accent" disabled={m.busy} onclick={m.checkPairs}>{i18n.t('checkPairs')}</button>

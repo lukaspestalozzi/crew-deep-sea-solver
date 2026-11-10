@@ -25,12 +25,22 @@ export class Cancelled extends Error {
 }
 
 export class SolverClient {
-  private worker: Worker;
+  private worker: Worker | null;
   private next = 1;
   private pending = new Map<number, Pending>();
 
   constructor() {
     this.worker = this.spawn();
+  }
+
+  /** The worker died or sent garbage: fail every pending call; the next call starts a fresh worker. */
+  private fail(worker: Worker, msg: string) {
+    if (this.worker !== worker) return;
+    worker.terminate();
+    this.worker = null;
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of pending) p.reject(new Error(msg));
   }
 
   private spawn(): Worker {
@@ -55,6 +65,8 @@ export class SolverClient {
       if (result && 'error' in result) p.reject(new Error(result.error.msg));
       else p.resolve(result.ok);
     };
+    worker.onerror = (e: ErrorEvent) => this.fail(worker, e.message || 'worker error');
+    worker.onmessageerror = () => this.fail(worker, 'worker message error');
     return worker;
   }
 
@@ -68,12 +80,13 @@ export class SolverClient {
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, progress, decided, trace });
+      this.worker ??= this.spawn();
       this.worker.postMessage({ id, fn, args, trace: !!trace });
     });
   }
 
   cancel() {
-    this.worker.terminate();
+    this.worker?.terminate();
     for (const p of this.pending.values()) p.reject(new Cancelled());
     this.pending.clear();
     this.worker = this.spawn();
@@ -99,9 +112,9 @@ export class SolverPool {
   }
 
   /** A single call on the first worker. */
-  one<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void): Promise<T> {
+  one<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T> {
     if (!this.clients.length) this.clients.push(new SolverClient());
-    return this.clients[0].call<T>(fn, args, progress, undefined, this.traceOf(0));
+    return this.clients[0].call<T>(fn, args, progress, decided, this.traceOf(0));
   }
 
   all<T>(fn: string, args: unknown[], progress?: (...p: number[]) => void, decided?: (d: unknown) => void): Promise<T[]> {
@@ -112,7 +125,11 @@ export class SolverPool {
       last[k] = p;
       progress?.(...p.map((_, i) => last.reduce((s, q) => s + (q[i] ?? 0), 0)));
     };
-    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p), decided, this.traceOf(k))));
+    return Promise.all(this.clients.map((c, k) => c.call<T>(fn, [...args, k, n], (...p) => report(k, p), decided, this.traceOf(k)))).catch((e) => {
+      // One worker failed: stop the others.
+      if (!(e instanceof Cancelled)) this.cancel();
+      throw e;
+    });
   }
 
   cancel() {

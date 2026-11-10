@@ -63,6 +63,9 @@
   {/each}
 
   {#if 'ok' in info && info.ok}
+    {#if info.ok.owners_break_draft}
+      <p class="small" style="color: var(--accent)">{i18n.t('ownersBreakDraft')}</p>
+    {/if}
     {#if session.tasks.some((t) => t.owner === '?')}
       <p class="small muted">{i18n.t('unknownOwner', { n: info.ok.drafts })}</p>
     {/if}

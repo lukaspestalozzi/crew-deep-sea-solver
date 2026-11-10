@@ -6,8 +6,13 @@ const ready = init();
 type Call = { id: number; fn: string; args: unknown[]; trace?: boolean };
 
 self.onmessage = async (e: MessageEvent<Call>) => {
-  await ready;
   const { id, fn, args, trace } = e.data;
+  try {
+    await ready;
+  } catch (err) {
+    postMessage({ id, result: { error: { msg: `solver failed to load: ${String(err)}` } } });
+    return;
+  }
   const progress = (...p: number[]) => postMessage({ id, progress: p });
   // Trace events, stamped with the time here (the solver has no clock).
   w.set_trace(trace ? (ev: string) => postMessage({ id, trace: { ...JSON.parse(ev), t: performance.now() + performance.timeOrigin } }) : null);

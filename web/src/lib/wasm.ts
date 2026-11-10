@@ -66,6 +66,8 @@ export interface Check {
   to_play: number;
   redeal: string | null;
   drafts: number;
+  /** The fixed owners do not fit the standard draft rule. */
+  owners_break_draft?: boolean;
 }
 export const check = (text: string): Result<Check> => JSON.parse(w.check(text));
 

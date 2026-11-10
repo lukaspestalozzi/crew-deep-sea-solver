@@ -19,6 +19,16 @@
   const rest = $derived(ALL_CARDS.filter((c) => !picks.slice(0, n - 1).some((h) => h.includes(c))));
   const mine = $derived(last ? rest : picks[step]);
   const sizeOk = $derived(mine.length === base || (40 % n !== 0 && mine.length === base + 1));
+  const sizes = base + (40 % n ? '–' + (base + 1) : '');
+  // Why the last player cannot confirm: cards claimed twice, else a wrong size.
+  const problem = $derived.by(() => {
+    if (!last || sizeOk) return null;
+    const seen = new Set<string>();
+    const dup = new Set<string>();
+    picks.slice(0, n - 1).forEach((h) => h.forEach((c) => (seen.has(c) ? dup.add(c) : seen.add(c))));
+    if (dup.size) return i18n.t('duplicateClaims', { cards: sortCards([...dup]).join(' ') });
+    return i18n.t('handSizeBad', { k: mine.length, sizes });
+  });
   const holdsS4 = $derived(mine.includes('S4'));
 
   function tap(card: string) {
@@ -69,9 +79,10 @@
     </div>
     <CardGrid cell={(c) => (mine.includes(c) ? 'mine' : last ? 'disabled' : 'free')} ontap={tap} />
     <div class="panel row between">
-      <strong>{mine.length} / {base}{40 % n ? '–' + (base + 1) : ''}</strong>
+      <strong>{mine.length} / {sizes}</strong>
       {#if holdsS4}<span style="color: var(--accent)" class="small">{i18n.t('youAreCaptain')}</span>{/if}
     </div>
+    {#if problem}<div class="error">{problem}</div>{/if}
     <div class="grow"></div>
     <button class="btn primary" disabled={!sizeOk} onclick={done}>
       {last ? i18n.t('doneSealing') : i18n.t('hideAndPass', { p: i18n.player(step + 1) })}

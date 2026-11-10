@@ -37,8 +37,11 @@ export class Job {
   last = $state('');
   cancelled = $state(false);
   error = $state<string | null>(null);
+  /** Counts runs: a run only writes its outcome while its number is current. */
+  gen = 0;
 
   reset() {
+    this.gen++;
     this.running = this.cancelled = false;
     this.progress = this.last = '';
     this.error = null;
@@ -152,6 +155,7 @@ class Mission {
 
   private async runVerdict(text: string) {
     const job = this.verdictJob;
+    const gen = job.gen;
     const p = parse(text);
     if ('error' in p) {
       job.error = (p.error.line ? `line ${p.error.line}: ` : '') + p.error.msg;
@@ -184,9 +188,11 @@ class Mission {
         }
       }
     } catch (e) {
+      if (job.gen !== gen) return;
       if (e instanceof Cancelled) job.cancelled = true;
       else job.error = String(e instanceof Error ? e.message : e);
     }
+    if (job.gen !== gen) return;
     job.running = false;
     job.progress = '';
   }
@@ -202,14 +208,17 @@ class Mission {
   private async run(job: Job, f: () => Promise<void>) {
     if (this.busy) return;
     job.reset();
+    const gen = job.gen;
     job.running = true;
     this.pool.trace = inspector.on ? inspector.sink(job.name) : null;
     try {
       await f();
     } catch (e) {
+      if (job.gen !== gen) return;
       if (e instanceof Cancelled) job.cancelled = true;
       else job.error = String(e instanceof Error ? e.message : e);
     }
+    if (job.gen !== gen) return;
     this.rows.flush();
     this.pairing.flush();
     inspector.stopRunning(job.name);
