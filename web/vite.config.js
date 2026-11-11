@@ -21,7 +21,10 @@ function precache() {
         .map((f) => relative(outDir, f).split(sep).join('/'))
         .filter((f) => f !== 'sw.js')
         .sort();
-      const version = createHash('sha1').update(assets.join('\n')).update(readFileSync(join(outDir, 'index.html'))).digest('hex').slice(0, 10);
+      // Names and contents: files without a hash in their name (icon, manifest) count too.
+      const hash = createHash('sha1');
+      for (const f of assets) hash.update(f).update(readFileSync(join(outDir, f)));
+      const version = hash.digest('hex').slice(0, 10);
       const src = readFileSync(sw, 'utf8')
         .replace("const VERSION = 'dev';", `const VERSION = ${JSON.stringify(version)};`)
         .replace('const ASSETS = [];', `const ASSETS = ${JSON.stringify(assets)};`);

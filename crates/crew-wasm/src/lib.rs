@@ -98,7 +98,10 @@ pub fn from_dto(d: &SituationDto) -> Result<Situation, String> {
         .hands
         .iter()
         .map(|h| h.iter().map(|c| card(c)).collect::<Result<_, _>>())
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<crew_core::card::CardSet>, _>>()?;
+    if let Some(p) = hands.iter().zip(&d.hands).position(|(set, h)| set.len() as usize != h.len()) {
+        return Err(format!("Player{} holds a card twice", p + 1));
+    }
     let tasks = d
         .tasks
         .iter()
@@ -1034,6 +1037,10 @@ Player2: win B4
         let mut bad = dto.clone();
         bad["played"] = json!([{ "leader": 9, "cards": ["P2"] }]);
         assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "leader");
+        let mut bad = dto.clone();
+        let c = bad["hands"][0][0].clone();
+        bad["hands"][0].as_array_mut().unwrap().push(c);
+        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "card twice in a hand");
         // A session still being entered is written; parse says what is missing.
         let mut partial = dto.clone();
         partial["hands"][3] = json!([]);
