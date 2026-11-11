@@ -98,7 +98,10 @@ pub fn from_dto(d: &SituationDto) -> Result<Situation, String> {
         .hands
         .iter()
         .map(|h| h.iter().map(|c| card(c)).collect::<Result<_, _>>())
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<crew_core::card::CardSet>, _>>()?;
+    if let Some(p) = hands.iter().zip(&d.hands).position(|(set, h)| set.len() as usize != h.len()) {
+        return Err(format!("Player{} holds a card twice", p + 1));
+    }
     let tasks = d
         .tasks
         .iter()
@@ -154,6 +157,21 @@ fn line_tricks(s: &Situation, line: &[Card]) -> Value {
         }
     }
     json!(out)
+}
+
+/// Is `line` a legal continuation of the situation's position?
+fn check_line(s: &Situation, line: &[Card]) -> Result<(), String> {
+    let mut g = s.game().map_err(|e| e.to_string())?;
+    for (i, &c) in line.iter().enumerate() {
+        if g.is_over() {
+            return Err(format!("the line has {} cards, but the game ends after {}", line.len(), i));
+        }
+        if !g.legal_moves().contains(c) {
+            return Err(format!("illegal play {c} (move {}, Player{})", i + 1, g.to_play() + 1));
+        }
+        g.play(c);
+    }
+    Ok(())
 }
 
 /// The specific cards a task names, for display as chips ("all 3s" = the four 3s).
@@ -255,10 +273,23 @@ pub fn write(dtos_json: &str) -> String {
         Ok(d) => d,
         Err(e) => return err(e),
     };
-    match dtos.iter().map(from_dto).collect::<Result<Vec<_>, _>>() {
-        Ok(list) => ok(json!(notation::write_all(&list))),
-        Err(e) => err(e),
+    let list = match dtos.iter().map(from_dto).collect::<Result<Vec<_>, _>>() {
+        Ok(l) => l,
+        Err(e) => return err(e),
+    };
+    // Only what cannot be written: a session still being entered (hands
+    // incomplete, a trick not yet legal) is written as it is, and `parse` or
+    // `check` report what is wrong with it.
+    for (i, s) in list.iter().enumerate() {
+        let n = s.hands.len();
+        if !(3..=5).contains(&n) {
+            return err(format!("situation {}: player count must be 3 to 5, got {n}", i + 1));
+        }
+        if let Some(t) = s.played.iter().find(|t| t.leader as usize >= n) {
+            return err(format!("situation {}: no player {} to lead a trick", i + 1, t.leader as usize + 1));
+        }
     }
+    ok(json!(notation::write_all(&list)))
 }
 
 /// Check a situation: returns captain, difficulty sum and position, or the problem.
@@ -275,6 +306,7 @@ pub fn check(text: &str) -> String {
             "tricks_played": g.tricks.len(),
             "to_play": g.to_play(),
             "redeal": solver::redeal(&s),
+            "owners_break_draft": !crew_core::draft::owners_fit_draft(&s.tasks, g.n, g.captain as usize),
             "drafts": crew_core::draft::count_drafts(&s.tasks, g.n, g.captain as usize),
         })),
         Err(e) => err(e),
@@ -516,6 +548,9 @@ pub fn tightness(text: &str, line_json: &str) -> String {
         Ok(l) => l,
         Err(e) => return err(e),
     };
+    if let Err(e) = check_line(&s, &line) {
+        return err(e);
+    }
     match analysis::tightness(&s, &line, None) {
         Ok(Some(t)) => ok(json!({ "critical": t.critical, "choices": t.choices, "tightness": t.tightness })),
         Ok(None) => ok(Value::Null),
@@ -843,6 +878,9 @@ pub fn random_situation(players: u32, target: u32, seed: u32) -> String {
     let Some(cards) = crew_core::draft::draw_tasks(catalogue(), players, target, &mut rng) else {
         return err(format!("could not draw tasks for difficulty {target}"));
     };
+    if cards.len() > notation::MAX_TASKS {
+        return err(format!("difficulty {target} needs {} tasks; at most {} are allowed", cards.len(), notation::MAX_TASKS));
+    }
     let s = Situation {
         title: Some(format!("Random · {players} players · difficulty {target}")),
         target: Some(target),
@@ -965,5 +1003,70 @@ Player2: win B4
         assert_eq!(r["ok"]["owners"][0], "Player2");
         assert!(r["ok"]["owners"][1].as_str().unwrap().starts_with("Player"));
         assert!(!r["ok"]["line"].as_array().unwrap().is_empty());
+    }
+
+    fn json_of(s: String) -> Value {
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[test]
+    fn tightness_rejects_an_illegal_line() {
+        let fixed = TEXT.replace("?: first-trick", "Player1: first-trick");
+        let r = json_of(tightness(&fixed, r#"["P1","P1","S4"]"#));
+        assert!(r["error"]["msg"].as_str().unwrap().contains("illegal play P1"), "{r}");
+        let r = json_of(tightness(&fixed, r#"["P2","P1"]"#));
+        assert!(r.get("error").is_none(), "{r}");
+    }
+
+    #[test]
+    fn play_out_rejects_an_unknown_order() {
+        let fixed = TEXT.replace("?: first-trick", "Player1: first-trick");
+        let r = json_of(play_out_impl(&fixed, 99, 0.0, None));
+        assert!(r["error"]["msg"].as_str().unwrap().contains("unknown move order"), "{r}");
+    }
+
+    #[test]
+    fn write_validates_the_situation() {
+        let parsed = json_of(parse(TEXT));
+        let dto = &parsed["ok"][0];
+        assert!(json_of(write(&json!([dto]).to_string())).get("ok").is_some());
+        let mut bad = dto.clone();
+        bad["hands"].as_array_mut().unwrap().pop();
+        bad["hands"].as_array_mut().unwrap().pop();
+        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "2 players");
+        let mut bad = dto.clone();
+        bad["played"] = json!([{ "leader": 9, "cards": ["P2"] }]);
+        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "leader");
+        let mut bad = dto.clone();
+        let c = bad["hands"][0][0].clone();
+        bad["hands"][0].as_array_mut().unwrap().push(c);
+        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "card twice in a hand");
+        // A session still being entered is written; parse says what is missing.
+        let mut partial = dto.clone();
+        partial["hands"][3] = json!([]);
+        let text = json_of(write(&json!([partial]).to_string()));
+        assert!(text["ok"].as_str().unwrap().contains("Player4: \n"), "{text}");
+        assert!(json_of(parse(text["ok"].as_str().unwrap())).get("error").is_some());
+    }
+
+    #[test]
+    fn check_flags_owners_that_break_the_draft() {
+        let ok = TEXT.replace("?: first-trick", "Player1: first-trick");
+        assert_eq!(json_of(check(&ok))["ok"]["owners_break_draft"], false);
+        let bad = TEXT.replace("?: first-trick", "Player2: first-trick");
+        assert_eq!(json_of(check(&bad))["ok"]["owners_break_draft"], true);
+        let four = format!("{TEXT}Player3: tricks =2\nPlayer3: no pink\n");
+        assert_eq!(json_of(check(&four))["ok"]["owners_break_draft"], true);
+    }
+
+    #[test]
+    fn too_many_tasks_are_an_error_everywhere() {
+        let mut text = TEXT.to_string();
+        for t in catalogue().iter().filter(|t| !t.is_rule() && t.id != "win B4" && t.id != "first-trick").take(24) {
+            text += &format!("?: {}\n", t.id);
+        }
+        for r in [solve_impl(&text, None), solve_drafts_impl(&text, None), drafts_impl(&text, false, 10, (0, 1), None, None), check(&text), conflict(&text)] {
+            assert!(json_of(r)["error"]["msg"].as_str().unwrap().contains("at most 25"));
+        }
     }
 }

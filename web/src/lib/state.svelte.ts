@@ -102,8 +102,32 @@ class Session {
     };
   }
 
-  restore(snap: ReturnType<Session['snapshot']>) {
-    Object.assign(this, snap);
+  /** Restore a stored snapshot; throws (changing nothing) if it is not shaped like one. */
+  restore(snap: unknown) {
+    const s = snap as ReturnType<Session['snapshot']> | null;
+    const isNum = (x: unknown) => typeof x === 'number' && Number.isFinite(x);
+    const orNull = (x: unknown, ok: (x: unknown) => boolean) => x === null || ok(x);
+    const valid =
+      !!s &&
+      typeof s === 'object' &&
+      Number.isInteger(s.players) &&
+      s.players >= 1 &&
+      s.players <= 5 &&
+      ['full', 'sealed', 'reconstruct', 'live', 'explore'].includes(s.mode) &&
+      !!s.owner &&
+      typeof s.owner === 'object' &&
+      Object.values(s.owner).every(isNum) &&
+      Array.isArray(s.tasks) &&
+      s.tasks.every((t) => !!t && typeof t.id === 'string' && typeof t.owner === 'string') &&
+      Array.isArray(s.played) &&
+      s.played.every((t) => !!t && isNum(t.leader) && Array.isArray(t.cards) && t.cards.every((c) => typeof c === 'string')) &&
+      orNull(s.title, (x) => typeof x === 'string') &&
+      orNull(s.mission, isNum) &&
+      orNull(s.target, isNum) &&
+      typeof s.sealed === 'boolean' &&
+      orNull(s.savedId, (x) => typeof x === 'string');
+    if (!valid) throw new Error('bad snapshot');
+    Object.assign(this, s);
   }
 }
 

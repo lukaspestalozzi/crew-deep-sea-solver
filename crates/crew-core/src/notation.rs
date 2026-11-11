@@ -38,6 +38,7 @@ impl fmt::Display for ParseError {
 
 /// Parse one or more situations separated by `---` lines.
 pub fn parse_all(text: &str) -> Result<Vec<Situation>, ParseError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Vec::new();
     let mut chunk: Vec<(usize, &str)> = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -63,9 +64,17 @@ pub fn parse(text: &str) -> Result<Situation, ParseError> {
     Ok(all.remove(0))
 }
 
+/// The line without its comment. A `title:` line keeps any `#`: titles are free text.
 fn strip(line: &str) -> &str {
+    let t = line.trim();
+    if t.starts_with("title:") {
+        return t;
+    }
     line.split('#').next().unwrap().trim()
 }
+
+/// The most task cards a situation may have (the solver's limit).
+pub const MAX_TASKS: usize = 25;
 
 fn player_index(s: &str) -> Option<u8> {
     let n: u8 = s.strip_prefix("Player")?.parse().ok()?;
@@ -163,6 +172,12 @@ fn parse_lines(lines: &[(usize, &str)]) -> Result<Situation, ParseError> {
                         },
                     ));
                 }
+                if s.tasks.iter().any(|a| a.card.id == card.id) {
+                    return Err(err(ln, format!("'{}' is listed twice; the deck has one of each card", card.id)));
+                }
+                if s.tasks.len() >= MAX_TASKS {
+                    return Err(err(ln, format!("at most {MAX_TASKS} tasks per situation")));
+                }
                 s.tasks.push(Assignment { card, owner });
             }
             Section::Played => {
@@ -233,7 +248,9 @@ fn parse_lines(lines: &[(usize, &str)]) -> Result<Situation, ParseError> {
 pub fn write(s: &Situation) -> String {
     let mut out = format!("crew {VERSION}\n");
     if let Some(t) = &s.title {
-        out += &format!("title: {t}\n");
+        // One line, and nothing a reader would take for a comment or separator.
+        let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        out += &format!("title: {}\n", t.trim());
     }
     if let Some(m) = s.mission {
         out += &format!("mission: {m}\n");
@@ -338,5 +355,48 @@ trick2 Player1: B4 B6 B3 B5
         let wrong_leader = SAMPLE.replace("trick2 Player1", "trick2 Player3");
         let s = parse(&wrong_leader).unwrap();
         assert_eq!(s.game().unwrap_err().to_string(), "trick2: Player3 leads, but Player1 won the previous trick");
+    }
+
+    #[test]
+    fn titles_roundtrip_with_hash_and_without_injection() {
+        let mut s = parse(SAMPLE).unwrap();
+        s.title = Some("bench seed 1 #1".into());
+        let back = parse(&write(&s)).unwrap();
+        assert_eq!(back.title.as_deref(), Some("bench seed 1 #1"));
+        s.title = Some("a\n---\nb\r\tc".into());
+        let text = write(&s);
+        assert_eq!(parse_all(&text).unwrap().len(), 1);
+        assert_eq!(parse(&text).unwrap().title.as_deref(), Some("a --- b  c"));
+        // Other lines still have comments.
+        assert_eq!(parse(&SAMPLE.replace("title: Mission 13", "title: M # x")).unwrap().title.as_deref(), Some("M # x"));
+    }
+
+    #[test]
+    fn accepts_a_byte_order_mark() {
+        let s = parse(&format!("\u{feff}{SAMPLE}")).unwrap();
+        assert_eq!(s.players(), 4);
+        assert_eq!(parse_all(&format!("\u{feff}{SAMPLE}---\n{SAMPLE}")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_task_listed_twice() {
+        let dup = SAMPLE.replace("Player1: first-trick", "Player1: win B4");
+        let e = parse(&dup).unwrap_err();
+        assert_eq!(e.line, 16);
+        assert!(e.msg.contains("twice"), "{}", e.msg);
+        // Same card through a differently written ID.
+        let dup = SAMPLE.replace("?:       tricks =2", "Player3: win  P9 Y8");
+        assert!(parse(&dup).unwrap_err().msg.contains("twice"));
+    }
+
+    #[test]
+    fn rejects_more_than_25_tasks() {
+        let ids: Vec<String> = crate::catalogue::catalogue().iter().filter(|t| !t.is_rule()).take(26).map(|t| t.id.clone()).collect();
+        let header = "crew 1\nplayers: 4\nPlayer1: P2 P8 B4 B9 G1 G6 Y3 Y7 S2 S4\nPlayer2: P1 P5 B1 B2 B6 G4 G9 Y2 Y6 S1\nPlayer3: P3 P6 B3 B8 G2 G5 G8 Y1 Y8 S3\nPlayer4: rest\ntasks:\n";
+        let text = |n: usize| header.to_string() + &ids[..n].iter().map(|i| format!("?: {i}\n")).collect::<String>();
+        assert_eq!(parse(&text(25)).unwrap().tasks.len(), 25);
+        let e = parse(&text(26)).unwrap_err();
+        assert_eq!(e.line, 7 + 26);
+        assert!(e.msg.contains("at most 25"), "{}", e.msg);
     }
 }

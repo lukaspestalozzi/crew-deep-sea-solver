@@ -1,9 +1,12 @@
-// Offline support: cache the app shell and assets on first use.
-const CACHE = 'deep-sea-v1';
+// Offline support: the whole build is precached on install. `vite build`
+// fills in ASSETS (every emitted file) and VERSION (changes with the build).
+const VERSION = 'dev';
+const ASSETS = [];
+const CACHE = 'deep-sea-' + VERSION;
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(['./', './index.html', './manifest.webmanifest', './icon.svg'])));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(['./', ...new Set(['index.html', 'manifest.webmanifest', 'icon.svg', ...ASSETS].map((a) => './' + a))])));
 });
 
 self.addEventListener('activate', (e) => {
@@ -22,8 +25,10 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(req)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy));
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy));
+          }
           return res;
         })
         .catch(() => caches.match(req).then((r) => r || caches.match('./index.html'))),

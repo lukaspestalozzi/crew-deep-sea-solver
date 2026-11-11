@@ -18,7 +18,7 @@
   const clashAlone = (t1: number, t2: number) =>
     pairs?.some((c) => c.tasks[0] === t1 && c.tasks[1] === t2 && c.players.length === c.tried.length) ?? false;
   /** A draft picked from the list, whose line is shown below it. */
-  let picked = $state<DraftRow | null>(null);
+  let picked = $state.raw<DraftRow | null>(null);
 
   let filter = $state<Filter>(new Map());
   let shown = $state(20);

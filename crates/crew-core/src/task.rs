@@ -135,7 +135,7 @@ impl Kind {
             Kind::WinNone(s) => {
                 let own_subs = g.hands[owner].intersect(Suit::Sub.cards());
                 if !won.intersect(*s).is_empty()
-                    || !top_subs(g, owner).intersect(*s).is_empty()
+                    || top_subs(g, owner).intersect(*s).len() > spare_cards(g, owner)
                     || own_subs.minus(*s).len() < certain_sub_wins(g, owner)
                 {
                     Failed
@@ -343,7 +343,7 @@ impl Kind {
                 let target = Card::new(Suit::Sub, *v);
                 let my_subs = won.intersect(Suit::Sub.cards());
                 if !my_subs.minus(CardSet::single(target)).is_empty()
-                    || !top_subs(g, owner).minus(CardSet::single(target)).is_empty()
+                    || top_subs(g, owner).minus(CardSet::single(target)).len() > spare_cards(g, owner)
                     || certain_sub_wins(g, owner) > g.hands[owner].contains(target) as u32
                     || others().any(|q| g.won[q].contains(target))
                     || (over && !my_subs.contains(target))
@@ -1006,14 +1006,19 @@ pub fn certain_sub_wins(g: &Game, p: usize) -> u32 {
             paired += 1;
         }
     }
-    let spare = g.hands[p].len().saturating_sub(g.tricks_left() as u32);
-    (own.len() as u32 - paired).saturating_sub(spare)
+    (own.len() as u32 - paired).saturating_sub(spare_cards(g, p))
+}
+
+/// Cards of player `p` that stay unplayed: a hand with more cards than
+/// tricks left (3 players, the hand dealt 14) keeps one, of its choice.
+fn spare_cards(g: &Game, p: usize) -> u32 {
+    g.hands[p].len().saturating_sub(g.tricks_left() as u32)
 }
 
 /// Submarines from the top that player `p` holds without a gap among the
-/// remaining submarines. Each of them is certain to win its own trick
-/// (one card per player per trick), so `p` is certain to win that many more
-/// tricks, and certain to capture these submarines.
+/// remaining submarines. Each of them wins its trick when played (one card
+/// per player per trick) and is captured then; all but [`spare_cards`] of
+/// them are certain to be played.
 fn top_subs(g: &Game, p: usize) -> CardSet {
     let mut out = CardSet::EMPTY;
     let remaining = g.unplayed().intersect(Suit::Sub.cards());
@@ -1211,6 +1216,44 @@ mod tests {
             }
         }
         assert!(checked > 5000, "only {checked} early verdicts checked");
+    }
+
+    /// At the end of the game the evaluation must match the task's
+    /// definition, computed here from the won cards and trick counts alone
+    /// (also when a 3-player game leaves a submarine unplayed).
+    #[test]
+    fn final_verdicts_match_the_definitions() {
+        use crate::rng::Rng;
+        let mut rng = Rng::new(3);
+        let subs = Suit::Sub.cards();
+        for case in 0..3000 {
+            let n = 3 + case % 3;
+            let mut g = Game::new(&Game::random_hands(n, &mut rng)).unwrap();
+            while !g.is_over() {
+                let m: Vec<Card> = g.legal_moves().iter().collect();
+                g.play(m[rng.below(m.len())]);
+            }
+            let set: CardSet = Card::all().filter(|_| rng.below(8) == 0).collect();
+            for p in 0..n {
+                let won = g.won[p];
+                let check = |k: Kind, truth: bool| {
+                    let want = if truth { Status::Done } else { Status::Failed };
+                    assert_eq!(k.eval(&g, p), want, "case {case}: {k:?} for Player{}, won {won:?}, left {:?}", p + 1, g.hands[p]);
+                };
+                check(Kind::WinNone(subs), won.intersect(subs).is_empty());
+                check(Kind::WinNone(set), won.intersect(set).is_empty());
+                check(Kind::WinCards(set), won.intersect(set) == set);
+                for v in 1..=4 {
+                    check(Kind::OnlySub(v), won.intersect(subs) == CardSet::single(Card::new(Suit::Sub, v)));
+                }
+                for k in 0..=3 {
+                    check(Kind::SuitCounts { counts: vec![(Suit::Sub, k)], exact: true }, won.intersect(subs).len() == k as u32);
+                    check(Kind::SuitCounts { counts: vec![(Suit::Sub, k)], exact: false }, won.intersect(subs).len() >= k as u32);
+                }
+                check(Kind::ExactTricks(g.trick_counts[p]), true);
+                check(Kind::ExactTricks(g.trick_counts[p] + 1), false);
+            }
+        }
     }
 
     #[test]

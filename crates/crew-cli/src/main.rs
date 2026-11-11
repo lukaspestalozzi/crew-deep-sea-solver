@@ -3,6 +3,10 @@
 //! ```text
 //! crew solve FILE [--no-cache]   solve every situation in a .crew file
 //! ```
+//!
+//! Exit codes of `solve`: 1 if any situation had an error (or the arguments
+//! were wrong), else 2 if any verdict is infeasible or a re-deal, else 3 if
+//! any is undecided or cancelled, else 0.
 
 use crew_core::analysis::{self, DraftOptions};
 use crew_core::card::Card;
@@ -16,12 +20,12 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("solve") => cmd_solve(&args[1..]),
-        Some("bench") => cmd_bench(&args[1..]),
-        Some("orders") => cmd_orders(&args[1..]),
+        Some("bench") => cmd_bench(&args[1..]).map(|()| 0),
+        Some("orders") => cmd_orders(&args[1..]).map(|()| 0),
         _ => Err(USAGE.to_string()),
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("{e}");
             ExitCode::FAILURE
@@ -30,36 +34,101 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--no-cache] [--dfs] [--best-first] [--deck-order] [--zobrist] [--trace OUT]
+  crew solve FILE [--analyse] [--all-drafts] [--count-drafts] [--limit N] [--trace OUT] [search flags]
                                  solve every situation in a .crew file; tasks with
                                  owner ? are searched over all legal drafts at once;
                                  --count-drafts also counts the drafts that work (sampled
-                                 above N drafts); --all-drafts also checks other drafts;
-                                 --analyse adds critical decisions, smallest conflict
-                                 and point of no return; --dfs, --best-first,
-                                 --deck-order and --zobrist switch strategy (default:
-                                 restarts alternating move orders), move order and hashing
-  crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v]
-                                 random deals, tasks drawn to the target sum, random legal draft
-  crew bench --load FILE [--timeout SECS] [-v]
+                                 above N drafts, N >= 1, default 2000; only for tasks with
+                                 owner ?); --all-drafts also checks the other drafts, judged
+                                 from the deal (only with fixed owners); --analyse adds
+                                 critical decisions, smallest conflict and point of no
+                                 return (only with fixed owners)
+                                 exit code: 1 if any situation had an error, else 2 if any
+                                 verdict is infeasible or a re-deal, else 3 if any is
+                                 undecided or cancelled, else 0
+  crew bench [--players N] [--target SUM] [--count K] [--seed S] [--timeout SECS] [--save FILE] [-v] [--trace OUT] [search flags]
+                                 random deals, tasks drawn to the target sum, random legal
+                                 draft; N is 3 to 5, SECS a positive number
+  crew bench --load FILE [--timeout SECS] [-v] [--trace OUT] [search flags]
                                  the same timing over the situations in FILE; with owner ?
                                  the verdict over all drafts is timed
-                                 (bench also takes --dfs, --best-first, --deck-order, --zobrist, --no-cache, --trace OUT)
   crew orders [--players N] [--target SUM] [--count K] [--seed S] [--budget NODES] [--effort NODES] [--threads T]
                                  compare the move orders: random missions with a random
                                  draft; at every position with a choice along a winning
                                  line, how often each order's first choice wins and the
                                  mean rank of its first winning move (leads and follows
                                  apart); and the positions a depth-first search needs with
-                                 each order (at most --effort per mission)";
+                                 each order (at most --effort per mission)
+  search flags (solve, bench): --dfs, --best-first, --deck-order, --task-aware,
+                                 --lookahead-all, --zobrist, --no-cache switch the search
+                                 strategy, move order, hashing and position cache (default:
+                                 restarts alternating move orders); --trace OUT writes every
+                                 search as JSON lines";
 
-fn flag<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> Result<T, String> {
-    match args.iter().position(|a| a == name) {
-        None => Ok(default),
-        Some(i) => args
-            .get(i + 1)
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("{name} needs a value\n{USAGE}")),
+/// The command line of one command: flags with a value, flags without, and
+/// the arguments that are neither. Anything else is an error.
+struct Args {
+    values: Vec<(String, String)>,
+    flags: Vec<String>,
+    positional: Vec<String>,
+}
+
+/// Flags that choose the search, for `solve` and `bench`.
+const SEARCH_FLAGS: &[&str] = &["--no-cache", "--dfs", "--best-first", "--deck-order", "--task-aware", "--lookahead-all", "--zobrist"];
+
+fn parse_args(args: &[String], values: &[&str], flags: &[&str]) -> Result<Args, String> {
+    let mut out = Args { values: Vec::new(), flags: Vec::new(), positional: Vec::new() };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if values.contains(&a.as_str()) {
+            match it.next() {
+                Some(v) if !v.starts_with("--") => out.values.push((a.clone(), v.clone())),
+                _ => return Err(format!("{a} needs a value\n{USAGE}")),
+            }
+        } else if flags.contains(&a.as_str()) {
+            out.flags.push(a.clone());
+        } else if a.len() > 1 && a.starts_with('-') {
+            return Err(format!("unknown flag '{a}'\n{USAGE}"));
+        } else {
+            out.positional.push(a.clone());
+        }
+    }
+    Ok(out)
+}
+
+impl Args {
+    fn has(&self, name: &str) -> bool {
+        self.flags.iter().any(|f| f == name)
+    }
+
+    fn value(&self, name: &str) -> Option<&str> {
+        self.values.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// The value of a flag as a number, or `default`.
+    fn num<T: std::str::FromStr>(&self, name: &str, default: T) -> Result<T, String> {
+        match self.value(name) {
+            None => Ok(default),
+            Some(v) => v.parse().map_err(|_| format!("{name}: '{v}' is not a valid number")),
+        }
+    }
+
+    /// No arguments besides flags.
+    fn no_positional(&self) -> Result<(), String> {
+        match self.positional.first() {
+            Some(p) => Err(format!("unexpected argument '{p}'\n{USAGE}")),
+            None => Ok(()),
+        }
+    }
+}
+
+/// 3 to 5 players.
+fn players_arg(a: &Args) -> Result<usize, String> {
+    let n: usize = a.num("--players", 4)?;
+    if (3..=5).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!("--players: {n} is not 3, 4 or 5"))
     }
 }
 
@@ -74,7 +143,7 @@ fn with_timeout<R>(secs: f64, f: impl FnOnce(&std::sync::atomic::AtomicBool) -> 
         let (tx, rx) = mpsc::channel::<()>();
         let cancel_ref = &cancel;
         scope.spawn(move || {
-            if rx.recv_timeout(Duration::from_secs_f64(secs)).is_err() {
+            if rx.recv_timeout(Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX)).is_err() {
                 cancel_ref.store(true, Ordering::Relaxed);
             }
         });
@@ -123,50 +192,55 @@ fn cli_trace() -> Option<crew_core::trace::Trace<'static>> {
     TRACE.get().map(|_| crew_core::trace::Trace::new(&trace_sink))
 }
 
-fn search_options(args: &[String]) -> Options<'static> {
+fn search_options(args: &Args) -> Result<Options<'static>, String> {
     let mut o = Options::default();
-    if let Some(path) = args.iter().position(|a| a == "--trace").and_then(|i| args.get(i + 1)) {
-        match std::fs::File::create(path) {
-            Ok(f) => {
-                let _ = TRACE.set(std::sync::Mutex::new((f, Instant::now())));
-            }
-            Err(e) => eprintln!("--trace {path}: {e}"),
-        }
+    if let Some(path) = args.value("--trace") {
+        let f = std::fs::File::create(path).map_err(|e| format!("--trace {path}: {e}"))?;
+        let _ = TRACE.set(std::sync::Mutex::new((f, Instant::now())));
     }
     o.trace = cli_trace();
-    if args.iter().any(|a| a == "--no-cache") {
+    if args.has("--no-cache") {
         o.use_cache = false;
     }
-    if args.iter().any(|a| a == "--deck-order") {
+    if args.has("--deck-order") {
         o.decider = &crew_core::decider::DECK_ORDER;
     }
-    if args.iter().any(|a| a == "--task-aware") {
+    if args.has("--task-aware") {
         o.decider = &crew_core::decider::TASK_AWARE;
     }
-    if args.iter().any(|a| a == "--lookahead-all") {
+    if args.has("--lookahead-all") {
         o.decider = &crew_core::decider::LOOKAHEAD_ALL;
     }
-    if args.iter().any(|a| a == "--zobrist") {
+    if args.has("--zobrist") {
         o.zobrist = true;
     }
-    if args.iter().any(|a| a == "--dfs") {
+    if args.has("--dfs") {
         o.strategy = solver::Strategy::Dfs;
     }
-    if args.iter().any(|a| a == "--best-first") {
+    if args.has("--best-first") {
         o.strategy = solver::Strategy::BestFirst { max_positions: 2_000_000 };
     }
-    o
+    Ok(o)
+}
+
+/// Task cards drawn to the difficulty `target`, at most [`notation::MAX_TASKS`] of them.
+fn draw_tasks(players: usize, target: u32, rng: &mut crew_core::rng::Rng) -> Result<Vec<&'static crew_core::catalogue::TaskCard>, String> {
+    let cards = crew_core::draft::draw_tasks(crew_core::catalogue::catalogue(), players, target, rng)
+        .ok_or_else(|| format!("could not draw task cards to difficulty {target}"))?;
+    if cards.len() > notation::MAX_TASKS {
+        return Err(format!("difficulty {target} needs {} task cards; at most {} are allowed", cards.len(), notation::MAX_TASKS));
+    }
+    Ok(cards)
 }
 
 /// A random mission: deal, task cards drawn to `target`, a random legal draft.
 fn random_mission(players: usize, target: u32, rng: &mut crew_core::rng::Rng, title: String) -> Result<Situation, String> {
-    use crew_core::catalogue::catalogue;
     use crew_core::draft;
     use crew_core::game::Game;
     use crew_core::situation::Assignment;
     let hands = Game::random_hands(players, rng);
     let captain = Game::new(&hands).unwrap().captain as usize;
-    let cards = draft::draw_tasks(catalogue(), players, target, rng).ok_or("could not draw tasks")?;
+    let cards = draw_tasks(players, target, rng)?;
     let mut tasks: Vec<Assignment> = cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect();
     let owners = draft::random_draft(&tasks, players, captain, rng).ok_or("no legal draft")?;
     for (a, o) in tasks.iter_mut().zip(owners) {
@@ -226,13 +300,15 @@ fn order_rows(s: &Situation, budget: u64, effort: u64) -> OrderRows {
 fn cmd_orders(args: &[String]) -> Result<(), String> {
     use crew_core::position::ORDERS;
     use crew_core::rng::Rng;
-    let players: usize = flag(args, "--players", 4)?;
-    let target: u32 = flag(args, "--target", 7)?;
-    let count: usize = flag(args, "--count", 20)?;
-    let seed: u64 = flag(args, "--seed", 1)?;
-    let budget: u64 = flag(args, "--budget", 2_000_000)?;
-    let effort: u64 = flag(args, "--effort", 5_000_000)?;
-    let threads: usize = flag(args, "--threads", std::thread::available_parallelism().map_or(1, |n| n.get()))?;
+    let a = parse_args(args, &["--players", "--target", "--count", "--seed", "--budget", "--effort", "--threads"], &[])?;
+    a.no_positional()?;
+    let players = players_arg(&a)?;
+    let target: u32 = a.num("--target", 7)?;
+    let count: usize = a.num("--count", 20)?;
+    let seed: u64 = a.num("--seed", 1)?;
+    let budget: u64 = a.num("--budget", 2_000_000)?;
+    let effort: u64 = a.num("--effort", 5_000_000)?;
+    let threads: usize = a.num("--threads", std::thread::available_parallelism().map_or(1, |n| n.get()))?;
     let mut rng = Rng::new(seed);
     let missions: Vec<Situation> =
         (0..count).map(|i| random_mission(players, target, &mut rng, format!("orders seed {seed} #{}", i + 1))).collect::<Result<_, _>>()?;
@@ -293,22 +369,27 @@ fn cmd_orders(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_bench(args: &[String]) -> Result<(), String> {
-    use crew_core::catalogue::catalogue;
     use crew_core::draft;
     use crew_core::game::Game;
     use crew_core::rng::Rng;
     use crew_core::situation::{Assignment, Owner};
 
-    let players: usize = flag(args, "--players", 4)?;
-    let target: u32 = flag(args, "--target", 7)?;
-    let count: usize = flag(args, "--count", 20)?;
-    let seed: u64 = flag(args, "--seed", 1)?;
-    let timeout: f64 = flag(args, "--timeout", 10.0)?;
-    let save: Option<String> = args.iter().position(|a| a == "--save").and_then(|i| args.get(i + 1).cloned());
-    let verbose = args.iter().any(|a| a == "-v");
-    let search_opts = search_options(args);
+    let values = ["--players", "--target", "--count", "--seed", "--timeout", "--save", "--load", "--trace"];
+    let a = parse_args(args, &values, &[SEARCH_FLAGS, &["-v"]].concat())?;
+    a.no_positional()?;
+    let players = players_arg(&a)?;
+    let target: u32 = a.num("--target", 7)?;
+    let count: usize = a.num("--count", 20)?;
+    let seed: u64 = a.num("--seed", 1)?;
+    let timeout: f64 = a.num("--timeout", 10.0)?;
+    if !(timeout.is_finite() && timeout > 0.0 && timeout <= 1e9) {
+        return Err(format!("--timeout: {timeout} is not a number of seconds between 0 and 1e9"));
+    }
+    let save: Option<String> = a.value("--save").map(String::from);
+    let verbose = a.has("-v");
+    let search_opts = search_options(&a)?;
 
-    let load: Option<String> = args.iter().position(|a| a == "--load").and_then(|i| args.get(i + 1).cloned());
+    let load: Option<String> = a.value("--load").map(String::from);
     let loaded = match &load {
         Some(path) => {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -328,7 +409,7 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
             None => {
                 let hands = Game::random_hands(players, &mut rng);
                 let captain = Game::new(&hands).unwrap().captain as usize;
-                let cards = draft::draw_tasks(catalogue(), players, target, &mut rng).ok_or("could not draw tasks")?;
+                let cards = draw_tasks(players, target, &mut rng)?;
                 let mut tasks: Vec<Assignment> =
                     cards.into_iter().map(|card| Assignment { card, owner: Owner::Unknown }).collect();
                 let owners = draft::random_draft(&tasks, players, captain, &mut rng).ok_or("no legal draft")?;
@@ -389,33 +470,51 @@ fn owner_name(o: &Owner) -> String {
     }
 }
 
-/// Who takes which task and which tasks share a player, if anything stands out.
-fn print_relations(s: &Situation, r: &analysis::DraftRelations) {
+/// Who takes which task and which tasks share a player, if anything stands
+/// out. With `sampled` the drafts are only a sample: what holds in all of
+/// them is not proven for every working draft, and is worded so.
+fn print_relations(s: &Situation, r: &analysis::DraftRelations, sampled: Option<usize>) {
     let id = |t: usize| s.tasks[t].card.id.as_str();
+    let (must, never, always, never_together) = match sampled {
+        None => ("must:  ", "never: ", "always same player: ", "never same player:  "),
+        Some(_) => (
+            "in all sampled working drafts:  ",
+            "in none of the sampled working drafts:  ",
+            "same player in all sampled working drafts: ",
+            "different players in all sampled working drafts: ",
+        ),
+    };
     let lines: Vec<String> = r
         .must
         .iter()
-        .map(|&(t, o)| format!("must:  {} · {}", owner_name(&o), id(t)))
-        .chain(r.never.iter().map(|&(t, o)| format!("never: {} · {}", owner_name(&o), id(t))))
-        .chain(r.always_together.iter().map(|&(a, b)| format!("always same player: {} + {}", id(a), id(b))))
-        .chain(r.never_together.iter().map(|&(a, b)| format!("never same player:  {} + {}", id(a), id(b))))
+        .map(|&(t, o)| format!("{must}{} · {}", owner_name(&o), id(t)))
+        .chain(r.never.iter().map(|&(t, o)| format!("{never}{} · {}", owner_name(&o), id(t))))
+        .chain(r.always_together.iter().map(|&(a, b)| format!("{always}{} + {}", id(a), id(b))))
+        .chain(r.never_together.iter().map(|&(a, b)| format!("{never_together}{} + {}", id(a), id(b))))
         .chain(r.tendencies.iter().map(|&(a, b, w, all)| {
             format!("same player in {:.0}% of working drafts ({:.0}% of all): {} + {}", 100.0 * w, 100.0 * all, id(a), id(b))
         }))
         .collect();
     if !lines.is_empty() {
-        println!("who takes what (working drafts compared with all drafts):");
+        match sampled {
+            None => println!("who takes what (working drafts compared with all drafts):"),
+            Some(n) => println!("who takes what, among the {n} sampled working drafts only (a sample, not every draft):"),
+        }
         for l in lines {
             println!("  {l}");
         }
     }
 }
 
-fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
+/// Search the drafts and print the result; `false` if that was an error.
+fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) -> bool {
     let start = Instant::now();
     let opts = DraftOptions { reference, limit, trace: cli_trace(), ..DraftOptions::default() };
     match analysis::draft_search(s, &opts) {
-        Err(e) => println!("error: {e}"),
+        Err(e) => {
+            println!("error: {e}");
+            false
+        }
         Ok(r) => {
             let secs = start.elapsed().as_secs_f64();
             match r.any_works {
@@ -429,6 +528,9 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
             } else {
                 println!("{} of {} legal drafts work", r.working, r.total);
             }
+            if r.total == 0 {
+                println!("no legal draft: the fixed owners, or the tasks the captain may not take, do not fit the draft rule");
+            }
             if r.undecided > 0 {
                 println!("{} undecided (node limit per draft)", r.undecided);
             }
@@ -438,7 +540,7 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
             let mut rel = analysis::draft_relations(&r.drafts);
             // Already listed as impossible on its own.
             rel.never.retain(|&(t, o)| !matches!(o, Owner::Player(p) if r.impossible_pairs.contains(&(t, p as usize))));
-            print_relations(s, &rel);
+            print_relations(s, &rel, r.sampled.then_some(r.working as usize));
             let shown = match (&r.closest, &r.example) {
                 (Some((owners, dist, line)), _) => {
                     println!("smallest fix ({dist} task(s) change owner):");
@@ -464,19 +566,49 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) {
                 print_line(&d, line);
             }
             println!("{secs:.3} s");
+            true
         }
     }
 }
 
-fn cmd_solve(args: &[String]) -> Result<(), String> {
-    let file = args.iter().find(|a| !a.starts_with("--")).ok_or(USAGE)?;
-    let opts = search_options(args);
-    let count = args.iter().any(|a| a == "--count-drafts");
-    let all_drafts = args.iter().any(|a| a == "--all-drafts");
-    let analyse = args.iter().any(|a| a == "--analyse");
-    let limit: u64 = flag(args, "--limit", 2000)?;
+/// Exit code of one verdict (see the usage text).
+fn verdict_code(v: &Verdict) -> u8 {
+    match v {
+        Verdict::Feasible(_) => 0,
+        Verdict::Infeasible | Verdict::Redeal(_) => 2,
+        Verdict::Cancelled | Verdict::Undecided => 3,
+    }
+}
+
+fn cmd_solve(args: &[String]) -> Result<u8, String> {
+    let a = parse_args(
+        args,
+        &["--limit", "--trace"],
+        &[SEARCH_FLAGS, &["--analyse", "--all-drafts", "--count-drafts"]].concat(),
+    )?;
+    let file = match a.positional.as_slice() {
+        [f] => f,
+        [] => return Err(USAGE.to_string()),
+        [_, extra, ..] => return Err(format!("unexpected argument '{extra}'\n{USAGE}")),
+    };
+    let opts = search_options(&a)?;
+    let count = a.has("--count-drafts");
+    let all_drafts = a.has("--all-drafts");
+    let analyse = a.has("--analyse");
+    let limit: u64 = a.num("--limit", 2000)?;
+    if limit == 0 {
+        return Err(format!("--limit: must be at least 1\n{USAGE}"));
+    }
     let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
     let list = notation::parse_all(&text).map_err(|e| format!("{file}: {e}"))?;
+    // Worst outcome so far: 1 error, 2 infeasible or re-deal, 3 undecided or cancelled (the
+    // code of the first kind in that order of priority).
+    let (mut errors, mut lost, mut open) = (false, false, false);
+    let mut tally = |code: u8| match code {
+        2 => lost = true,
+        3 => open = true,
+        _ => {}
+    };
     for (i, s) in list.iter().enumerate() {
         if list.len() > 1 {
             println!("--- situation {} ---", i + 1);
@@ -484,11 +616,24 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
         if let Some(t) = &s.title {
             println!("{t}");
         }
+        if let Ok(g) = s.game() {
+            if !crew_core::draft::owners_fit_draft(&s.tasks, g.n, g.captain as usize) {
+                println!("warning: the fixed owners do not fit the standard draft (too many tasks for a player, or the captain holds a task he may not take); solving anyway");
+            }
+        }
         if s.tasks.iter().any(|a| a.owner == Owner::Unknown) {
+            if analyse || all_drafts {
+                let names: Vec<&str> = [(analyse, "--analyse"), (all_drafts, "--all-drafts")].iter().filter(|x| x.0).map(|x| x.1).collect();
+                println!("note: {} ignored: this situation has tasks with owner ?, searched over all drafts (--count-drafts counts the ones that work)", names.join(" and "));
+            }
             let start = Instant::now();
             match solver::solve_drafts(s, &opts) {
-                Err(e) => println!("error: {e}"),
+                Err(e) => {
+                    println!("error: {e}");
+                    errors = true;
+                }
                 Ok((v, owners, stats)) => {
+                    tally(verdict_code(&v));
                     match (&v, owners) {
                         (Verdict::Feasible(line), Some(owners)) => {
                             println!("FEASIBLE with this draft:");
@@ -513,14 +658,21 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
                 }
             }
             if count {
-                print_drafts(s, None, limit);
+                errors |= !print_drafts(s, None, limit);
             }
             continue;
         }
+        if count {
+            println!("note: --count-drafts ignored: no task has owner ? (use --all-drafts to check the other drafts)");
+        }
         let start = Instant::now();
         match solver::solve(s, &opts) {
-            Err(e) => println!("error: {e}"),
+            Err(e) => {
+                println!("error: {e}");
+                errors = true;
+            }
             Ok((v, stats)) => {
+                tally(verdict_code(&v));
                 let secs = start.elapsed().as_secs_f64();
                 match &v {
                     Verdict::Feasible(line) => {
@@ -581,20 +733,31 @@ fn cmd_solve(args: &[String]) -> Result<(), String> {
         if all_drafts {
             println!("other drafts:");
             let reference: Vec<Owner> = s.tasks.iter().map(|a| a.owner).collect();
-            let mut open = s.clone();
-            for a in open.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
+            // Whether another draft would have worked is judged from the deal.
+            let mut all = s.clone();
+            all.played.clear();
+            for a in all.tasks.iter_mut().filter(|a| a.owner != Owner::Crew) {
                 a.owner = Owner::Unknown;
             }
-            print_drafts(&open, Some(reference), limit);
+            errors |= !print_drafts(&all, Some(reference), limit);
         }
     }
-    Ok(())
+    Ok(if errors {
+        1
+    } else if lost {
+        2
+    } else if open {
+        3
+    } else {
+        0
+    })
 }
 
 /// Print a winning line trick by trick, continuing from the situation's position.
 fn print_line(s: &Situation, line: &[Card]) {
     let mut g = s.game().expect("situation was validated");
-    let mut trick_cards: Vec<String> = Vec::new();
+    // The trick in progress already holds cards.
+    let mut trick_cards: Vec<String> = g.current.iter().map(|c| c.to_string()).collect();
     let mut leader = g.leader;
     for &c in line {
         if g.current.is_empty() {

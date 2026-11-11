@@ -133,14 +133,17 @@ class PositionStore {
 
   private async run(job: Job, f: () => Promise<void>) {
     job.reset();
+    const gen = job.gen;
     job.running = true;
     this.pool.trace = inspector.on ? inspector.sink(job.name) : null;
     try {
       await f();
     } catch (e) {
+      if (job.gen !== gen) return;
       if (e instanceof Cancelled) job.cancelled = true;
       else job.error = String(e instanceof Error ? e.message : e);
     }
+    if (job.gen !== gen) return;
     inspector.stopRunning(job.name);
     job.running = false;
     job.progress = '';
@@ -216,10 +219,13 @@ export const position = new PositionStore();
 export function positionOnLine(s: Situation, owners: string[] | undefined, tricks: TrickOut[], k: number, fromDeal = false): string {
   const n = s.hands.length;
   const played = fromDeal ? [] : s.played.filter((t) => t.cards.length === n);
+  // A trick in progress in the situation: its cards stay (the line's first trick finishes it).
+  const partial = fromDeal ? undefined : s.played.find((t) => t.cards.length < n);
+  const along = tricks.slice(0, k).map((t) => ({ leader: t.leader, cards: t.cards }));
   return toText({
     ...s,
     tasks: owners ? s.tasks.map((t, i) => ({ ...t, owner: owners[i] })) : s.tasks,
-    played: [...played, ...tricks.slice(0, k).map((t) => ({ leader: t.leader, cards: t.cards }))],
+    played: [...played, ...(k === 0 && partial ? [partial] : along)],
   });
 }
 

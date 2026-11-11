@@ -18,7 +18,12 @@
     const snap = localStorage.getItem('session');
     if (snap) session.restore(JSON.parse(snap));
   } catch {
-    /* ignore a broken snapshot */
+    // Discard a broken snapshot.
+    try {
+      localStorage.removeItem('session');
+    } catch {
+      /* storage unavailable */
+    }
   }
   $effect(() => {
     const snap = JSON.stringify(session.snapshot());
