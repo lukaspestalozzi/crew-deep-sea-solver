@@ -60,7 +60,8 @@ self.onmessage = async (e: MessageEvent<Call>) => {
         out = JSON.stringify({ error: { msg: `unknown function ${fn}` } });
     }
   } catch (err) {
-    out = JSON.stringify({ error: { msg: String(err) } });
+    // The solver itself broke (a trap): this instance is not to be used again.
+    out = JSON.stringify({ error: { msg: String(err), fatal: true } });
   }
   postMessage({ id, result: JSON.parse(out) });
 };

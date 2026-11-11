@@ -62,8 +62,10 @@ export class SolverClient {
         return;
       }
       this.pending.delete(id);
-      if (result && 'error' in result) p.reject(new Error(result.error.msg));
-      else p.resolve(result.ok);
+      if (result && 'error' in result) {
+        p.reject(new Error(result.error.msg));
+        if (result.error.fatal) this.fail(worker, result.error.msg);
+      } else p.resolve(result.ok);
     };
     worker.onerror = (e: ErrorEvent) => this.fail(worker, e.message || 'worker error');
     worker.onmessageerror = () => this.fail(worker, 'worker message error');

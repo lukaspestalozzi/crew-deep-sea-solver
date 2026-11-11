@@ -274,24 +274,19 @@ pub fn write(dtos_json: &str) -> String {
         Ok(l) => l,
         Err(e) => return err(e),
     };
-    // The normal validation: what is written must read back (3-5 players, no
-    // card twice, at most 25 tasks, ...) and replay.
-    let text = notation::write_all(&list);
-    match notation::parse_all(&text) {
-        Ok(back) => {
-            for (i, s) in back.iter().enumerate() {
-                if let Err(e) = s.game() {
-                    return err(format!("situation {}: {e}", i + 1));
-                }
-            }
+    // Only what cannot be written: a session still being entered (hands
+    // incomplete, a trick not yet legal) is written as it is, and `parse` or
+    // `check` report what is wrong with it.
+    for (i, s) in list.iter().enumerate() {
+        let n = s.hands.len();
+        if !(3..=5).contains(&n) {
+            return err(format!("situation {}: player count must be 3 to 5, got {n}", i + 1));
         }
-        Err(e) => {
-            // Name the situation, not a line of the generated text.
-            let n = text.lines().take(e.line.saturating_sub(1)).filter(|l| l.trim() == "---").count() + 1;
-            return err(format!("situation {n}: {}", e.msg));
+        if let Some(t) = s.played.iter().find(|t| t.leader as usize >= n) {
+            return err(format!("situation {}: no player {} to lead a trick", i + 1, t.leader as usize + 1));
         }
     }
-    ok(json!(text))
+    ok(json!(notation::write_all(&list)))
 }
 
 /// Check a situation: returns captain, difficulty sum and position, or the problem.
@@ -1037,19 +1032,14 @@ Player2: win B4
         bad["hands"].as_array_mut().unwrap().pop();
         assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "2 players");
         let mut bad = dto.clone();
-        let c = bad["hands"][0][0].clone();
-        bad["hands"][1][0] = c;
-        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "duplicate card");
-        let mut bad = dto.clone();
         bad["played"] = json!([{ "leader": 9, "cards": ["P2"] }]);
         assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "leader");
-        let mut bad = dto.clone();
-        bad["played"] = json!([{ "leader": 2, "cards": ["P3"] }]);
-        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "wrong leader");
-        let mut bad = dto.clone();
-        let t = bad["tasks"][0].clone();
-        bad["tasks"] = json!(vec![t; 2]);
-        assert!(json_of(write(&json!([bad]).to_string())).get("error").is_some(), "same task twice");
+        // A session still being entered is written; parse says what is missing.
+        let mut partial = dto.clone();
+        partial["hands"][3] = json!([]);
+        let text = json_of(write(&json!([partial]).to_string()));
+        assert!(text["ok"].as_str().unwrap().contains("Player4: \n"), "{text}");
+        assert!(json_of(parse(text["ok"].as_str().unwrap())).get("error").is_some());
     }
 
     #[test]

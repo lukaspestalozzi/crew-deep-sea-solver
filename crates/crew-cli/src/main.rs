@@ -529,7 +529,7 @@ fn print_drafts(s: &Situation, reference: Option<Vec<Owner>>, limit: u64) -> boo
                 println!("{} of {} legal drafts work", r.working, r.total);
             }
             if r.total == 0 {
-                println!("no legal draft: the fixed owners break the draft rule");
+                println!("no legal draft: the fixed owners, or the tasks the captain may not take, do not fit the draft rule");
             }
             if r.undecided > 0 {
                 println!("{} undecided (node limit per draft)", r.undecided);
